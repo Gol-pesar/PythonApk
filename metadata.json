@@ -1,0 +1,6 @@
+{
+  "name": "PyLaunch 3.15",
+  "description": "محیط اجرا، ویرایشگر کد و کنسول تعاملی پایتون ۳.۱۵.۲ برای اندروید با پشتیبانی از قابلیت‌های جدید Python 3.15.2 (frozendict، lazy import، sentinel، UTF-8 پیش‌فرض و کتابخانه استاندارد).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

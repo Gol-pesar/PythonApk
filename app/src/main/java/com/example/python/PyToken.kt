@@ -1,0 +1,37 @@
+package com.example.python
+
+enum class TokenType {
+    // Structure
+    NEWLINE, INDENT, DEDENT, EOF,
+
+    // Literals & Identifiers
+    IDENTIFIER, INT, FLOAT, STRING, FSTRING,
+
+    // Keywords
+    FALSE, NONE, TRUE,
+    AND, AS, ASSERT, ASYNC, AWAIT,
+    BREAK, CLASS, CONTINUE, DEF, DEL,
+    ELIF, ELSE, EXCEPT, FINALLY, FOR,
+    FROM, GLOBAL, IF, IMPORT, IN, IS,
+    LAMBDA, NONLOCAL, NOT, OR, PASS,
+    RAISE, RETURN, TRY, WHILE, WITH, YIELD,
+
+    // Operators & Delimiters
+    PLUS, MINUS, STAR, DOUBLE_STAR, SLASH, DOUBLE_SLASH, PERCENT, AT,
+    LSHIFT, RSHIFT, AMPERSAND, PIPE, CARET, TILDE,
+    EQ, NEQ, LT, GT, LE, GE,
+    ASSIGN, WALRUS,
+    PLUS_ASSIGN, MINUS_ASSIGN, STAR_ASSIGN, SLASH_ASSIGN,
+    DOUBLE_SLASH_ASSIGN, PERCENT_ASSIGN, DOUBLE_STAR_ASSIGN,
+    AMP_ASSIGN, PIPE_ASSIGN, CARET_ASSIGN, LSHIFT_ASSIGN, RSHIFT_ASSIGN,
+    ARROW,
+    LPAREN, RPAREN, LBRACKET, RBRACKET, LBRACE, RBRACE,
+    COMMA, COLON, DOT, SEMICOLON, ELLIPSIS
+}
+
+data class PyToken(
+    val type: TokenType,
+    val lexeme: String,
+    val line: Int,
+    val column: Int
+)
