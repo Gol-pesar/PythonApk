@@ -65,14 +65,17 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
-      - name: Create temporary debug keystore
+      - name: Prepare debug keystore
         shell: bash
         run: |
           set -euo pipefail
 
           KEYSTORE_PATH="./debug.keystore"
           if [[ -f "$KEYSTORE_PATH" ]]; then
-            echo "Debug keystore already exists; skipping generation."
+            echo "Debug keystore already exists; skipping preparation."
+          elif [[ -f "./debug.keystore.base64" ]]; then
+            echo "Decoding project debug.keystore.base64 for consistent APK signature..."
+            base64 --decode ./debug.keystore.base64 > "$KEYSTORE_PATH"
           else
             KEYTOOL_BIN="${JAVA_HOME}/bin/keytool"
             if [[ ! -x "$KEYTOOL_BIN" ]]; then
@@ -93,10 +96,10 @@ jobs:
           fi
 
           if [[ ! -f "$KEYSTORE_PATH" || ! -s "$KEYSTORE_PATH" ]]; then
-            echo "::error::Failed to create temporary debug keystore at $KEYSTORE_PATH."
+            echo "::error::Failed to prepare debug keystore at $KEYSTORE_PATH."
             exit 1
           fi
-          echo "Temporary debug keystore is ready."
+          echo "Debug keystore is ready."
 
       - name: Build debug APK
         shell: bash
