@@ -76,6 +76,7 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
 
     private var entryIdCounter = 1L
     private var scriptJob: Job? = null
+    private var activeScriptEvaluator: PyEvaluator? = null
     private var pendingScriptInput: CompletableDeferred<String>? = null
     private var pendingReplInput: CompletableDeferred<String>? = null
 
@@ -207,6 +208,7 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
                 }
             )
 
+            activeScriptEvaluator = evaluator
             try {
                 withContext(Dispatchers.Default) {
                     evaluator.executeScript(code, fileName)
@@ -256,6 +258,8 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
     fun stopActiveScript() {
         pendingScriptInput?.cancel()
         pendingScriptInput = null
+        activeScriptEvaluator?.closeAllResources()
+        activeScriptEvaluator = null
         scriptJob?.cancel()
         scriptJob = null
         if (_uiState.value.runStatus == RunStatus.RUNNING) {
@@ -424,12 +428,14 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
     private fun appendOutputEntry(text: String, kind: ConsoleEntryKind) {
         _uiState.update { state ->
             val current = state.outputEntries
-            // Coalesce consecutive stdout chunks for crisp terminal display
+            // Coalesce consecutive stdout chunks and bound buffer so heavy logging stays smooth
             if (kind == ConsoleEntryKind.STDOUT && current.isNotEmpty() && current.last().kind == ConsoleEntryKind.STDOUT) {
-                val merged = current.dropLast(1) + current.last().copy(text = current.last().text + text)
+                val combined = current.last().text + text
+                val trimmed = if (combined.length > 32_768) combined.takeLast(32_768) else combined
+                val merged = current.dropLast(1) + current.last().copy(text = trimmed)
                 state.copy(outputEntries = merged)
             } else {
-                state.copy(outputEntries = current + ConsoleEntry(nextId(), text, kind))
+                state.copy(outputEntries = (current + ConsoleEntry(nextId(), text, kind)).takeLast(250))
             }
         }
     }

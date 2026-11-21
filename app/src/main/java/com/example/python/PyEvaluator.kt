@@ -16,17 +16,33 @@ class PyEvaluator(
     private val onInput: suspend (prompt: String) -> String
 ) {
     val globalEnv = PyEnvironment(isModuleRoot = true)
-    @Volatile
     var currentEnv: PyEnvironment = globalEnv
         private set
     private val moduleCache = java.util.concurrent.ConcurrentHashMap<String, PyModule>()
-    private val stepCounter = java.util.concurrent.atomic.AtomicInteger(0)
+    private val activeResources = java.util.concurrent.ConcurrentHashMap.newKeySet<java.io.Closeable>()
+    private val localTicks = ThreadLocal.withInitial { 0 }
     private var activeFileName = "<main>"
 
     init {
         PyBuiltins.install(globalEnv, workspaceDir)
         globalEnv.defineLocal("__name__", PyStr("__main__"))
         globalEnv.defineLocal("__version__", PyStr("3.15.2"))
+    }
+
+    fun registerResource(res: java.io.Closeable) {
+        activeResources.add(res)
+    }
+
+    fun unregisterResource(res: java.io.Closeable) {
+        activeResources.remove(res)
+    }
+
+    fun closeAllResources() {
+        val snapshot = activeResources.toList()
+        activeResources.clear()
+        for (r in snapshot) {
+            try { r.close() } catch (_: Exception) {}
+        }
     }
 
     fun emitStdout(text: String) {
@@ -40,20 +56,22 @@ class PyEvaluator(
 
     suspend fun executeScript(source: String, fileName: String = "main.py"): PyValue {
         activeFileName = fileName
-        stepCounter.set(0)
         globalEnv.defineLocal("__file__", PyStr(fileName))
         val tokens = PyLexer(source, fileName).tokenize()
         val stmts = PyParser(tokens, fileName).parseProgram()
         var lastVal: PyValue = PyNone
-        for (stmt in stmts) {
-            lastVal = execStmt(stmt, globalEnv)
+        try {
+            for (stmt in stmts) {
+                lastVal = execStmt(stmt, globalEnv)
+            }
+        } finally {
+            closeAllResources()
         }
         return lastVal
     }
 
     suspend fun executeRepl(source: String): PyValue? {
         activeFileName = "<stdin>"
-        stepCounter.set(0)
         val tokens = PyLexer(source, "<stdin>").tokenize()
         val stmts = PyParser(tokens, "<stdin>").parseProgram()
         if (stmts.size == 1 && stmts[0] is Stmt.ExprStmt) {
@@ -68,17 +86,17 @@ class PyEvaluator(
     }
 
     private suspend fun tick() {
-        val count = stepCounter.incrementAndGet()
-        if ((count and 255) == 0) {
+        val next = (localTicks.get() ?: 0) + 1
+        if ((next and 4095) == 0) {
+            localTicks.set(0)
             currentCoroutineContext().ensureActive()
-            yield()
+        } else {
+            localTicks.set(next)
         }
     }
 
     suspend fun execStmt(stmt: Stmt, env: PyEnvironment): PyValue {
         tick()
-        val prevEnv = currentEnv
-        currentEnv = env
         try {
             return when (stmt) {
                 is Stmt.Pass -> PyNone
@@ -185,16 +203,35 @@ class PyEvaluator(
                             }
                         }
                     } else {
-                        val items = toIterableList(evalExpr(stmt.iterable, env))
-                        for (item in items) {
-                            tick()
-                            assignTarget(stmt.target, item, env, stmt.line)
-                            try {
-                                execBlock(stmt.body, env)
-                            } catch (_: BreakSignal) {
-                                broke = true; break
-                            } catch (_: ContinueSignal) {
-                                continue
+                        val iterVal = evalExpr(stmt.iterable, env)
+                        if (iterVal is PyRange) {
+                            var cur = iterVal.start
+                            val stop = iterVal.stop
+                            val step = iterVal.step
+                            while (if (step > 0) cur < stop else cur > stop) {
+                                tick()
+                                assignTarget(stmt.target, PyInt.of(cur), env, stmt.line)
+                                try {
+                                    execBlock(stmt.body, env)
+                                } catch (_: BreakSignal) {
+                                    broke = true; break
+                                } catch (_: ContinueSignal) {
+                                    cur += step; continue
+                                }
+                                cur += step
+                            }
+                        } else {
+                            val items = toIterableList(iterVal)
+                            for (item in items) {
+                                tick()
+                                assignTarget(stmt.target, item, env, stmt.line)
+                                try {
+                                    execBlock(stmt.body, env)
+                                } catch (_: BreakSignal) {
+                                    broke = true; break
+                                } catch (_: ContinueSignal) {
+                                    continue
+                                }
                             }
                         }
                     }
@@ -348,8 +385,6 @@ class PyEvaluator(
         } catch (e: PyException) {
             if (e.frames.isEmpty()) e.addFrame(activeFileName, stmt.line, "<module>")
             throw e
-        } finally {
-            currentEnv = prevEnv
         }
     }
 
@@ -358,7 +393,6 @@ class PyEvaluator(
     }
 
     suspend fun evalExpr(expr: Expr, env: PyEnvironment): PyValue {
-        tick()
         return when (expr) {
             is Expr.Literal -> expr.value
             is Expr.Identifier -> env.get(expr.name)
@@ -520,6 +554,9 @@ class PyEvaluator(
                         a.name != null -> kwArgs[a.name] = evalExpr(a.value, env)
                         else -> posArgs.add(evalExpr(a.value, env))
                     }
+                }
+                if (callee is PyNativeFunction && (callee.name == "eval" || callee.name == "exec")) {
+                    currentEnv = env
                 }
                 callValue(callee, posArgs, kwArgs, expr.line)
             }
@@ -784,11 +821,10 @@ class PyEvaluator(
         }
         is PyBytes -> {
             if (idx is PySlice) {
-                val bytesList = obj.data.toList()
-                PyBytes(sliceList(bytesList, idx).toByteArray())
+                PyBytes(sliceByteArray(obj.data, idx))
             } else {
                 val i = normalizeIndex(idx, obj.data.size, line)
-                PyInt(obj.data[i].toInt() and 0xFF)
+                PyInt.of(obj.data[i].toInt() and 0xFF)
             }
         }
         is PyMemoryView -> {
@@ -855,6 +891,30 @@ class PyEvaluator(
             while (i > stop) { out.add(items[i]); i += step }
         }
         return out
+    }
+
+    private fun sliceByteArray(data: ByteArray, slice: PySlice): ByteArray {
+        val len = data.size
+        val step = slice.step ?: 1
+        if (step == 0) throw PyException("ValueError", "slice step cannot be zero")
+        if (step == 1) {
+            val start = (slice.start?.let { if (it < 0) len + it else it } ?: 0).coerceIn(0, len)
+            val stop = (slice.stop?.let { if (it < 0) len + it else it } ?: len).coerceIn(0, len)
+            return if (stop <= start) ByteArray(0) else data.copyOfRange(start, stop)
+        }
+        val out = java.io.ByteArrayOutputStream()
+        if (step > 0) {
+            val start = (slice.start?.let { if (it < 0) len + it else it } ?: 0).coerceIn(0, len)
+            val stop = (slice.stop?.let { if (it < 0) len + it else it } ?: len).coerceIn(0, len)
+            var i = start
+            while (i < stop) { out.write(data[i].toInt()); i += step }
+        } else {
+            val start = (slice.start?.let { if (it < 0) len + it else it } ?: (len - 1)).coerceIn(-1, len - 1)
+            val stop = (slice.stop?.let { if (it < 0) len + it else it } ?: -1).coerceIn(-1, len - 1)
+            var i = start
+            while (i > stop) { out.write(data[i].toInt()); i += step }
+        }
+        return out.toByteArray()
     }
 
     private fun normalizeIndex(idxVal: PyValue, size: Int, line: Int): Int {
@@ -987,6 +1047,19 @@ class PyEvaluator(
             if (l is PyTuple && r.asBigInt() != null) {
                 val n = r.asBigInt()!!.toInt().coerceAtLeast(0)
                 return PyTuple(buildList { repeat(n) { addAll(l.elements) } })
+            }
+        }
+
+        // Fast-path bulk bitwise ops on unsigned little-endian byte-backed PyInts (avoids BigInteger conversion!)
+        if (l is PyInt && r is PyInt) {
+            val la = l.rawLeBytes
+            val rb = r.rawLeBytes
+            if (la != null && rb != null) {
+                when (op) {
+                    "^" -> return PyInt.fromUnsignedLeBytes(PyInt.xorUnsignedLe(la, rb))
+                    "&" -> return PyInt.fromUnsignedLeBytes(PyInt.andUnsignedLe(la, rb))
+                    "|" -> return PyInt.fromUnsignedLeBytes(PyInt.orUnsignedLe(la, rb))
+                }
             }
         }
 

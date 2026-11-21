@@ -203,10 +203,27 @@ object PyMethods {
             val length = (kwargs["length"] ?: args.getOrNull(0))?.asBigInt()?.toInt() ?: 1
             val byteorder = ((kwargs["byteorder"] ?: args.getOrNull(1)) as? PyStr)?.value ?: "big"
             val signed = (kwargs["signed"] ?: args.getOrNull(2))?.toBool() ?: false
-            PyBytes(bigIntToBytes(num.value, length, byteorder, signed))
+            val raw = num.rawLeBytes
+            if (raw != null && !signed && byteorder == "little") {
+                if (length < 0) throw PyException("ValueError", "length argument must be non-negative")
+                if (raw.size == length) {
+                    PyBytes(raw.copyOf())
+                } else if (raw.size < length) {
+                    val out = ByteArray(length)
+                    System.arraycopy(raw, 0, out, 0, raw.size)
+                    PyBytes(out)
+                } else {
+                    for (i in length until raw.size) {
+                        if (raw[i].toInt() != 0) throw PyException("OverflowError", "int too big to convert")
+                    }
+                    PyBytes(raw.copyOf(length))
+                }
+            } else {
+                PyBytes(bigIntToBytes(num.value, length, byteorder, signed))
+            }
         }
         "bit_length" -> PyNativeFunction("bit_length") { _, _, _ ->
-            PyInt(num.value.abs().bitLength())
+            PyInt.of(num.value.abs().bitLength())
         }
         else -> null
     }
@@ -214,9 +231,17 @@ object PyMethods {
     private fun getNativeTypeMethod(fn: PyNativeFunction, name: String): PyValue? {
         if (fn.name == "int" && name == "from_bytes") {
             return PyNativeFunction("from_bytes") { _, args, kwargs ->
-                val raw = extractBytes(args[0])
+                val src = args[0]
                 val byteorder = ((kwargs["byteorder"] ?: args.getOrNull(1)) as? PyStr)?.value ?: "big"
                 val signed = (kwargs["signed"] ?: args.getOrNull(2))?.toBool() ?: false
+                if (!signed && byteorder == "little") {
+                    when (src) {
+                        is PyBytes -> if (src.data.size > 8) return@PyNativeFunction PyInt.fromUnsignedLeBytes(src.data.copyOf())
+                        is PyMemoryView -> if (src.length > 8) return@PyNativeFunction PyInt.fromUnsignedLeBytes(src.toByteArray())
+                        else -> Unit
+                    }
+                }
+                val raw = extractBytes(src)
                 PyInt(bytesToBigInt(raw, byteorder, signed))
             }
         }

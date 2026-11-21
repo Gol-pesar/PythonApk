@@ -121,26 +121,32 @@ fun CodeEditorPanel(
                         .fillMaxWidth()
                         .height(IntrinsicSize.Min)
                 ) {
-                    // Line Number Gutter
-                    Column(
+                    // Line Number Gutter (single cached Text node for smooth 60fps typing)
+                    val gutterText = remember(lineCount) {
+                        buildString(lineCount * 4) {
+                            for (n in 1..lineCount) {
+                                if (n > 1) append('\n')
+                                append(n)
+                            }
+                        }
+                    }
+                    Box(
                         modifier = Modifier
                             .width(44.dp)
                             .fillMaxHeight()
                             .background(syntaxColors.gutterBackground)
                             .padding(vertical = 12.dp, horizontal = 6.dp),
-                        horizontalAlignment = Alignment.End
+                        contentAlignment = Alignment.TopEnd
                     ) {
-                        for (lineNum in 1..lineCount) {
-                            Text(
-                                text = lineNum.toString(),
-                                style = codeTextStyle.copy(
-                                    color = syntaxColors.gutterText,
-                                    fontSize = (fontSizeSp - 1).coerceAtLeast(10).sp,
-                                    textAlign = TextAlign.End
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
+                        Text(
+                            text = gutterText,
+                            style = codeTextStyle.copy(
+                                color = syntaxColors.gutterText,
+                                fontSize = (fontSizeSp - 1).coerceAtLeast(10).sp,
+                                textAlign = TextAlign.End
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
 
                     // Divider line between gutter and code

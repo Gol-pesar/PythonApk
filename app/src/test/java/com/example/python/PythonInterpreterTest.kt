@@ -475,5 +475,31 @@ class PythonInterpreterTest {
         serverThread.join(3000)
         assertEquals("True True PING1234\n", out)
     }
+
+    @Test
+    fun testBulk16KbXorThroughputAndCorrectness() = kotlinx.coroutines.runBlocking {
+        val startMs = System.currentTimeMillis()
+        val out = runPython(
+            """
+            import sys, os
+            BO = sys.byteorder
+            _ifb = int.from_bytes
+            key = b"0123456789abcdef"
+            raw = key * 1025
+            mv_key = memoryview(raw)
+            chunk = os.urandom(16384)
+            k = _ifb(mv_key[:16384], BO)
+            cur = chunk
+            for i in range(250):
+                cur = (_ifb(cur, BO) ^ k).to_bytes(16384, BO)
+                cur = (_ifb(cur, BO) ^ k).to_bytes(16384, BO)
+            print(cur == chunk, len(cur))
+            """.trimIndent()
+        )
+        val elapsedMs = System.currentTimeMillis() - startMs
+        assertEquals("True 16384\n", out)
+        assertTrue("Expected 500x16KB (8MB) XOR to finish fast, took ${elapsedMs}ms", elapsedMs < 2000L)
+    }
 }
+
 

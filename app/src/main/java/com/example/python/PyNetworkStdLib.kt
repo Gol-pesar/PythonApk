@@ -3,6 +3,7 @@ package com.example.python
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -11,14 +12,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.EOFException
-import java.net.SocketTimeoutException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.Inet4Address
@@ -27,20 +25,35 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.random.Random
+
+private class PyWaitDeadline(val deadlineMs: Long) : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<PyWaitDeadline>
+}
 
 object PyNetworkStdLib {
+
+    // Unbounded cached daemon pool so 100+ simultaneous SOCKS5 keep-alive connections
+    // never starve Dispatchers.IO (which caps at 64 threads) or Dispatchers.Default.
+    private val netDispatcher = Executors.newCachedThreadPool { r ->
+        Thread(r, "PyNet-IO").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
 
     // -------------------------------------------------------------------------
     // struct module
@@ -386,8 +399,11 @@ object PyNetworkStdLib {
             PyCoroutine("wait_for") {
                 try {
                     if (timeoutMs != null) {
+                        val deadline = System.currentTimeMillis() + timeoutMs
                         withTimeout(timeoutMs) {
-                            if (coro is PyCoroutine) coro.awaitResult() else coro
+                            withContext(PyWaitDeadline(deadline)) {
+                                if (coro is PyCoroutine) coro.awaitResult() else coro
+                            }
                         }
                     } else {
                         if (coro is PyCoroutine) coro.awaitResult() else coro
@@ -403,7 +419,7 @@ object PyNetworkStdLib {
             PyCoroutine("gather") {
                 val results = coroutineScope {
                     args.map { item ->
-                        async {
+                        async(netDispatcher) {
                             try {
                                 if (item is PyCoroutine) item.awaitResult() else item
                             } catch (e: PyException) {
@@ -424,28 +440,34 @@ object PyNetworkStdLib {
             val backlog = (kwargs["backlog"] ?: args.getOrNull(3))?.asBigInt()?.toInt() ?: 128
 
             PyCoroutine("start_server") {
-                val serverSocket = withContext(Dispatchers.IO) {
+                val serverSocket = withContext(netDispatcher) {
                     ServerSocket().apply {
                         reuseAddress = true
-                        soTimeout = 300
                         bind(InetSocketAddress(host, port), backlog)
                     }
                 }
+                eval.registerResource(serverSocket)
                 createAsyncServerObject(serverSocket, callback, eval)
             }
         }
 
-        mod.members["open_connection"] = PyNativeFunction("open_connection") { _, args, _ ->
+        mod.members["open_connection"] = PyNativeFunction("open_connection") { eval, args, _ ->
             if (args.size < 2) throw PyException("TypeError", "open_connection() requires host and port")
             val host = (args[0] as PyStr).value
             val port = PyBuiltins.requireInt("open_connection", args[1]).toInt()
             PyCoroutine("open_connection") {
-                val sock = withContext(Dispatchers.IO) {
+                val sock = withContext(netDispatcher) {
                     Socket().apply {
+                        tcpNoDelay = true
+                        try {
+                            receiveBufferSize = 262144
+                            sendBufferSize = 262144
+                        } catch (_: Exception) {}
                         connect(InetSocketAddress(host, port), 15_000)
                     }
                 }
-                val (reader, writer) = createStreamPair(sock)
+                eval.registerResource(sock)
+                val (reader, writer) = createStreamPair(sock, eval)
                 PyTuple(listOf(reader, writer))
             }
         }
@@ -462,6 +484,7 @@ object PyNetworkStdLib {
         val inst = PyInstance(cls)
 
         fun closeServer() {
+            eval.unregisterResource(serverSocket)
             try { if (!serverSocket.isClosed) serverSocket.close() } catch (_: Exception) {}
         }
 
@@ -481,7 +504,6 @@ object PyNetworkStdLib {
         inst.fields["serve_forever"] = PyNativeFunction("serve_forever") { _, _, _ ->
             PyCoroutine("serve_forever") {
                 coroutineScope {
-                    // Ensure ServerSocket is closed immediately when this coroutine is cancelled (Stop button)
                     val closer = launch {
                         try {
                             awaitCancellationSafely()
@@ -492,23 +514,28 @@ object PyNetworkStdLib {
                     try {
                         while (isActive && !serverSocket.isClosed) {
                             val client = try {
-                                withContext(Dispatchers.IO) { serverSocket.accept() }
-                            } catch (_: SocketTimeoutException) {
-                                continue
-                            } catch (e: Exception) {
+                                withContext(netDispatcher) { serverSocket.accept() }
+                            } catch (_: Exception) {
                                 if (!isActive || serverSocket.isClosed) break
                                 continue
                             }
-                            launch(Dispatchers.IO) {
+                            try {
+                                client.tcpNoDelay = true
+                                client.receiveBufferSize = 262144
+                                client.sendBufferSize = 262144
+                            } catch (_: Exception) {}
+                            eval.registerResource(client)
+                            launch(netDispatcher) {
                                 try {
-                                    val (reader, writer) = createStreamPair(client)
+                                    val (reader, writer) = createStreamPair(client, eval)
                                     val res = eval.callValue(callback, listOf(reader, writer), emptyMap(), 0)
                                     if (res is PyCoroutine) res.awaitResult()
                                 } catch (_: CancellationException) {
                                     // Stop requested
                                 } catch (_: Exception) {
-                                    // Connection handler error isolated per client
+                                    // Isolated per client
                                 } finally {
+                                    eval.unregisterResource(client)
                                     try { client.close() } catch (_: Exception) {}
                                 }
                             }
@@ -528,11 +555,21 @@ object PyNetworkStdLib {
         kotlinx.coroutines.suspendCancellableCoroutine<Nothing> { }
     }
 
-    private fun createStreamPair(sock: Socket): Pair<PyInstance, PyInstance> {
-        try { sock.soTimeout = 250 } catch (_: Exception) {}
-        val input = BufferedInputStream(sock.getInputStream())
+    private fun applyDeadlineTimeout(sock: Socket, deadline: PyWaitDeadline?) {
+        try {
+            if (deadline != null) {
+                val rem = (deadline.deadlineMs - System.currentTimeMillis()).toInt().coerceAtLeast(1)
+                sock.soTimeout = rem
+            } else if (sock.soTimeout != 0) {
+                sock.soTimeout = 0
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun createStreamPair(sock: Socket, eval: PyEvaluator): Pair<PyInstance, PyInstance> {
+        val input = BufferedInputStream(sock.getInputStream(), 65536)
         val output = sock.getOutputStream()
-        val writeMutex = Mutex()
+        val writeLock = Any()
         val bufferedBytes = AtomicInteger(0)
         val wrappedSocket = wrapJavaSocket(sock)
 
@@ -541,18 +578,20 @@ object PyNetworkStdLib {
         val transport = PyInstance(transportCls)
         transport.fields["write"] = PyNativeFunction("write") { _, args, _ ->
             val data = PyMethods.extractBytes(args[0])
-            bufferedBytes.addAndGet(data.size)
-            withContext(Dispatchers.IO) {
-                writeMutex.withLock {
-                    output.write(data)
-                    output.flush()
-                    bufferedBytes.addAndGet(-data.size)
+            if (data.isNotEmpty()) {
+                bufferedBytes.addAndGet(data.size)
+                withContext(netDispatcher) {
+                    synchronized(writeLock) {
+                        output.write(data)
+                        output.flush()
+                        bufferedBytes.addAndGet(-data.size)
+                    }
                 }
             }
             PyNone
         }
         transport.fields["get_write_buffer_size"] = PyNativeFunction("get_write_buffer_size") { _, _, _ ->
-            PyInt(bufferedBytes.get().coerceAtLeast(0))
+            PyInt.of(bufferedBytes.get().coerceAtLeast(0))
         }
         transport.fields["get_extra_info"] = PyNativeFunction("get_extra_info") { _, args, _ ->
             val key = (args.firstOrNull() as? PyStr)?.value
@@ -565,22 +604,21 @@ object PyNetworkStdLib {
         reader.fields["read"] = PyNativeFunction("read") { _, args, _ ->
             val maxBytes = args.firstOrNull()?.asBigInt()?.toInt() ?: 65536
             PyCoroutine("StreamReader.read") {
-                val data = withContext(Dispatchers.IO) {
+                val deadline = currentCoroutineContext()[PyWaitDeadline]
+                val data = withContext(netDispatcher) {
+                    applyDeadlineTimeout(sock, deadline)
                     val size = if (maxBytes <= 0) 65536 else maxBytes.coerceAtMost(262144)
                     val buf = ByteArray(size)
-                    var n = -1
-                    while (currentCoroutineContext().isActive) {
-                        try {
-                            n = input.read(buf)
-                            break
-                        } catch (_: SocketTimeoutException) {
-                            currentCoroutineContext().ensureActive()
-                        } catch (_: Exception) {
-                            n = -1
-                            break
-                        }
+                    val n = try {
+                        input.read(buf)
+                    } catch (_: SocketTimeoutException) {
+                        throw PyException("TimeoutError", "Socket read timed out")
+                    } catch (_: Exception) {
+                        -1
+                    } finally {
+                        if (deadline != null) try { sock.soTimeout = 0 } catch (_: Exception) {}
                     }
-                    if (n <= 0) ByteArray(0) else buf.copyOf(n)
+                    if (n <= 0) ByteArray(0) else if (n == buf.size) buf else buf.copyOf(n)
                 }
                 PyBytes(data)
             }
@@ -588,18 +626,23 @@ object PyNetworkStdLib {
         reader.fields["readexactly"] = PyNativeFunction("readexactly") { _, args, _ ->
             val n = PyBuiltins.requireInt("readexactly", args[0]).toInt()
             PyCoroutine("StreamReader.readexactly") {
+                val deadline = currentCoroutineContext()[PyWaitDeadline]
                 val buf = ByteArray(n)
-                withContext(Dispatchers.IO) {
-                    var offset = 0
-                    while (offset < n) {
-                        currentCoroutineContext().ensureActive()
-                        val read = try {
-                            input.read(buf, offset, n - offset)
-                        } catch (_: SocketTimeoutException) {
-                            continue
+                withContext(netDispatcher) {
+                    try {
+                        var offset = 0
+                        while (offset < n) {
+                            applyDeadlineTimeout(sock, deadline)
+                            val read = try {
+                                input.read(buf, offset, n - offset)
+                            } catch (_: SocketTimeoutException) {
+                                throw PyException("TimeoutError", "readexactly timed out")
+                            }
+                            if (read == -1) throw PyException("EOFError", "IncompleteReadError: $offset bytes read of $n expected")
+                            offset += read
                         }
-                        if (read == -1) throw PyException("EOFError", "IncompleteReadError: $offset bytes read of $n expected")
-                        offset += read
+                    } finally {
+                        if (deadline != null) try { sock.soTimeout = 0 } catch (_: Exception) {}
                     }
                 }
                 PyBytes(buf)
@@ -607,17 +650,23 @@ object PyNetworkStdLib {
         }
         reader.fields["readline"] = PyNativeFunction("readline") { _, _, _ ->
             PyCoroutine("StreamReader.readline") {
+                val deadline = currentCoroutineContext()[PyWaitDeadline]
                 val baos = ByteArrayOutputStream()
-                withContext(Dispatchers.IO) {
-                    while (currentCoroutineContext().isActive) {
-                        val b = try {
-                            input.read()
-                        } catch (_: SocketTimeoutException) {
-                            continue
+                withContext(netDispatcher) {
+                    try {
+                        applyDeadlineTimeout(sock, deadline)
+                        while (true) {
+                            val b = try {
+                                input.read()
+                            } catch (_: SocketTimeoutException) {
+                                throw PyException("TimeoutError", "readline timed out")
+                            }
+                            if (b == -1) break
+                            baos.write(b)
+                            if (b == '\n'.code) break
                         }
-                        if (b == -1) break
-                        baos.write(b)
-                        if (b == '\n'.code) break
+                    } finally {
+                        if (deadline != null) try { sock.soTimeout = 0 } catch (_: Exception) {}
                     }
                 }
                 PyBytes(baos.toByteArray())
@@ -631,18 +680,20 @@ object PyNetworkStdLib {
         writer.fields["write"] = transport.fields["write"]!!
         writer.fields["drain"] = PyNativeFunction("drain") { _, _, _ ->
             PyCoroutine("StreamWriter.drain") {
-                withContext(Dispatchers.IO) {
-                    writeMutex.withLock { output.flush() }
+                withContext(netDispatcher) {
+                    synchronized(writeLock) { output.flush() }
                 }
                 PyNone
             }
         }
         writer.fields["close"] = PyNativeFunction("close") { _, _, _ ->
+            eval.unregisterResource(sock)
             try { sock.close() } catch (_: Exception) {}
             PyNone
         }
         writer.fields["wait_closed"] = PyNativeFunction("wait_closed") { _, _, _ ->
             PyCoroutine("StreamWriter.wait_closed") {
+                eval.unregisterResource(sock)
                 try { sock.close() } catch (_: Exception) {}
                 PyNone
             }
@@ -680,8 +731,9 @@ object PyNetworkStdLib {
             }
 
             PyCoroutine("websockets.connect") {
-                withContext(Dispatchers.IO) {
+                withContext(netDispatcher) {
                     openRealWebSocket(
+                        eval = eval,
                         url = url,
                         serverHostname = serverHostname,
                         headers = headers,
@@ -695,6 +747,7 @@ object PyNetworkStdLib {
     }
 
     private fun openRealWebSocket(
+        eval: PyEvaluator,
         url: String,
         serverHostname: String?,
         headers: Map<String, String>,
@@ -711,6 +764,11 @@ object PyNetworkStdLib {
         }
 
         val rawSocket = Socket()
+        try {
+            rawSocket.tcpNoDelay = true
+            rawSocket.receiveBufferSize = 262144
+            rawSocket.sendBufferSize = 262144
+        } catch (_: Exception) {}
         rawSocket.connect(InetSocketAddress(connectHost, port), timeoutMs)
         rawSocket.soTimeout = timeoutMs
 
@@ -731,12 +789,13 @@ object PyNetworkStdLib {
         } else {
             rawSocket
         }
+        eval.registerResource(sock)
 
         val out = sock.getOutputStream()
-        val inp = BufferedInputStream(sock.getInputStream())
+        val inp = BufferedInputStream(sock.getInputStream(), 65536)
 
         // RFC 6455 HTTP/1.1 Upgrade Handshake
-        val keyBytes = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val keyBytes = ByteArray(16).also { Random.Default.nextBytes(it) }
         val wsKey = Base64.getEncoder().encodeToString(keyBytes)
         val hostHeader = headers.entries.firstOrNull { it.key.equals("Host", true) }?.value
             ?: serverHostname
@@ -762,9 +821,9 @@ object PyNetworkStdLib {
         out.write(req.toByteArray(Charsets.US_ASCII))
         out.flush()
 
-        // Read HTTP status line + headers until \r\n\r\n
         val statusLine = readAsciiLine(inp)
         if (!statusLine.contains(" 101 ")) {
+            eval.unregisterResource(sock)
             try { sock.close() } catch (_: Exception) {}
             throw PyException("ConnectionError", "WebSocket handshake failed: $statusLine")
         }
@@ -773,10 +832,10 @@ object PyNetworkStdLib {
             if (line.isEmpty()) break
         }
 
-        // Use short read timeout after connect so coroutine cancellation and wait_for stay responsive
-        sock.soTimeout = 250
+        // Disable idle timeout so streaming reads block with 0% CPU and zero SocketTimeoutException overhead
+        sock.soTimeout = 0
 
-        return createWebSocketObject(sock, inp, out)
+        return createWebSocketObject(eval, sock, inp, out)
     }
 
     private fun readAsciiLine(inp: InputStream): String {
@@ -791,14 +850,14 @@ object PyNetworkStdLib {
     }
 
     private fun createWebSocketObject(
+        eval: PyEvaluator,
         sock: Socket,
         inp: InputStream,
         out: OutputStream
     ): PyInstance {
-        val sendMutex = Mutex()
-        val recvMutex = Mutex()
-        val rng = SecureRandom()
-        var closed = false
+        val sendLock = Any()
+        val recvLock = Any()
+        val closed = java.util.concurrent.atomic.AtomicBoolean(false)
 
         val wrappedSocket = wrapJavaSocket(sock)
         val transportCls = PyClass("WebSocketTransport", emptyList())
@@ -808,111 +867,169 @@ object PyNetworkStdLib {
             if (key == "socket") wrappedSocket else args.getOrNull(1) ?: PyNone
         }
 
-        suspend fun writeFrame(opcode: Int, payload: ByteArray) {
-            sendMutex.withLock {
-                withContext(Dispatchers.IO) {
-                    val mask = ByteArray(4).also { rng.nextBytes(it) }
-                    val header = ByteArrayOutputStream()
-                    header.write(0x80 or (opcode and 0x0F))
-                    val len = payload.size
-                    when {
-                        len <= 125 -> header.write(0x80 or len)
-                        len <= 65535 -> {
-                            header.write(0x80 or 126)
-                            header.write((len ushr 8) and 0xFF)
-                            header.write(len and 0xFF)
-                        }
-                        else -> {
-                            header.write(0x80 or 127)
-                            val bb = ByteBuffer.allocate(8).putLong(len.toLong()).array()
-                            header.write(bb)
-                        }
-                    }
-                    header.write(mask)
-                    val masked = ByteArray(len) { i ->
-                        (payload[i].toInt() xor mask[i % 4].toInt()).toByte()
-                    }
-                    out.write(header.toByteArray())
-                    out.write(masked)
-                    out.flush()
+        fun writeFrameBlocking(opcode: Int, payload: ByteArray) {
+            val len = payload.size
+            val headerLen = when {
+                len <= 125 -> 6
+                len <= 65535 -> 8
+                else -> 14
+            }
+            val frame = ByteArray(headerLen + len)
+            frame[0] = (0x80 or (opcode and 0x0F)).toByte()
+            var pos = 2
+            when {
+                len <= 125 -> frame[1] = (0x80 or len).toByte()
+                len <= 65535 -> {
+                    frame[1] = (0x80 or 126).toByte()
+                    frame[2] = ((len ushr 8) and 0xFF).toByte()
+                    frame[3] = (len and 0xFF).toByte()
+                    pos = 4
                 }
+                else -> {
+                    frame[1] = (0x80 or 127).toByte()
+                    val longLen = len.toLong()
+                    for (bIdx in 0 until 8) {
+                        frame[2 + bIdx] = ((longLen ushr (56 - bIdx * 8)) and 0xFFL).toByte()
+                    }
+                    pos = 10
+                }
+            }
+            val maskInt = Random.Default.nextInt()
+            val m0 = (maskInt ushr 24) and 0xFF
+            val m1 = (maskInt ushr 16) and 0xFF
+            val m2 = (maskInt ushr 8) and 0xFF
+            val m3 = maskInt and 0xFF
+            frame[pos] = m0.toByte()
+            frame[pos + 1] = m1.toByte()
+            frame[pos + 2] = m2.toByte()
+            frame[pos + 3] = m3.toByte()
+            pos += 4
+
+            var i = 0
+            while (i + 3 < len) {
+                frame[pos + i] = (payload[i].toInt() xor m0).toByte()
+                frame[pos + i + 1] = (payload[i + 1].toInt() xor m1).toByte()
+                frame[pos + i + 2] = (payload[i + 2].toInt() xor m2).toByte()
+                frame[pos + i + 3] = (payload[i + 3].toInt() xor m3).toByte()
+                i += 4
+            }
+            while (i < len) {
+                val m = when (i and 3) {
+                    0 -> m0
+                    1 -> m1
+                    2 -> m2
+                    else -> m3
+                }
+                frame[pos + i] = (payload[i].toInt() xor m).toByte()
+                i++
+            }
+
+            synchronized(sendLock) {
+                out.write(frame)
+                out.flush()
             }
         }
 
-        suspend fun readExact(n: Int): ByteArray = withContext(Dispatchers.IO) {
+        fun readExactBlocking(n: Int): ByteArray {
             val buf = ByteArray(n)
             var off = 0
             while (off < n) {
-                currentCoroutineContext().ensureActive()
-                val r = try {
-                    inp.read(buf, off, n - off)
-                } catch (_: SocketTimeoutException) {
-                    continue
-                }
+                val r = inp.read(buf, off, n - off)
                 if (r == -1) throw EOFException("WebSocket closed")
                 off += r
             }
-            buf
+            return buf
         }
 
-        suspend fun readMessage(): PyValue? {
-            recvMutex.withLock {
-                val fragOut = ByteArrayOutputStream()
+        fun readMessageBlocking(deadline: PyWaitDeadline?): PyValue? {
+            synchronized(recvLock) {
+                var fragOut: ByteArrayOutputStream? = null
                 var msgOpcode = -1
-                while (!closed) {
-                    val b0: Int
-                    val b1: Int
-                    try {
-                        val hdr = readExact(2)
-                        b0 = hdr[0].toInt() and 0xFF
-                        b1 = hdr[1].toInt() and 0xFF
-                    } catch (ce: CancellationException) {
-                        throw ce
-                    } catch (_: Exception) {
-                        closed = true
-                        return null
-                    }
-                    val fin = (b0 and 0x80) != 0
-                    val opcode = b0 and 0x0F
-                    val masked = (b1 and 0x80) != 0
-                    var payloadLen = (b1 and 0x7F).toLong()
-                    if (payloadLen == 126L) {
-                        val ext = readExact(2)
-                        payloadLen = (((ext[0].toInt() and 0xFF) shl 8) or (ext[1].toInt() and 0xFF)).toLong()
-                    } else if (payloadLen == 127L) {
-                        val ext = readExact(8)
-                        payloadLen = ByteBuffer.wrap(ext).long
-                    }
-                    val maskKey = if (masked) readExact(4) else null
-                    val payload = if (payloadLen > 0) {
-                        readExact(payloadLen.toInt())
-                    } else ByteArray(0)
-                    if (maskKey != null) {
-                        for (i in payload.indices) {
-                            payload[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
-                        }
-                    }
-
-                    when (opcode) {
-                        0x8 -> { // Close
-                            closed = true
-                            try { writeFrame(0x8, ByteArray(0)) } catch (_: Exception) {}
-                            try { sock.close() } catch (_: Exception) {}
+                try {
+                    while (!closed.get()) {
+                        applyDeadlineTimeout(sock, deadline)
+                        val b0: Int
+                        val b1: Int
+                        try {
+                            val h0 = inp.read()
+                            if (h0 == -1) {
+                                closed.set(true)
+                                return null
+                            }
+                            val h1 = inp.read()
+                            if (h1 == -1) {
+                                closed.set(true)
+                                return null
+                            }
+                            b0 = h0 and 0xFF
+                            b1 = h1 and 0xFF
+                        } catch (_: SocketTimeoutException) {
+                            throw PyException("TimeoutError", "WebSocket recv timed out")
+                        } catch (_: Exception) {
+                            closed.set(true)
                             return null
                         }
-                        0x9 -> { // Ping -> respond with Pong
-                            try { writeFrame(0xA, payload) } catch (_: Exception) {}
+                        val fin = (b0 and 0x80) != 0
+                        val opcode = b0 and 0x0F
+                        val masked = (b1 and 0x80) != 0
+                        var payloadLen = (b1 and 0x7F).toLong()
+                        if (payloadLen == 126L) {
+                            val ext = readExactBlocking(2)
+                            payloadLen = (((ext[0].toInt() and 0xFF) shl 8) or (ext[1].toInt() and 0xFF)).toLong()
+                        } else if (payloadLen == 127L) {
+                            val ext = readExactBlocking(8)
+                            payloadLen = ByteBuffer.wrap(ext).long
                         }
-                        0xA -> { /* Pong -> ignore */ }
-                        0x0, 0x1, 0x2 -> {
-                            if (opcode != 0x0) msgOpcode = opcode
-                            fragOut.write(payload)
-                            if (fin) {
-                                val data = fragOut.toByteArray()
-                                return if (msgOpcode == 0x1) PyStr(String(data, Charsets.UTF_8)) else PyBytes(data)
+                        val maskKey = if (masked) readExactBlocking(4) else null
+                        val payload = if (payloadLen > 0) readExactBlocking(payloadLen.toInt()) else ByteArray(0)
+                        if (maskKey != null) {
+                            val m0 = maskKey[0].toInt()
+                            val m1 = maskKey[1].toInt()
+                            val m2 = maskKey[2].toInt()
+                            val m3 = maskKey[3].toInt()
+                            var i = 0
+                            while (i + 3 < payload.size) {
+                                payload[i] = (payload[i].toInt() xor m0).toByte()
+                                payload[i + 1] = (payload[i + 1].toInt() xor m1).toByte()
+                                payload[i + 2] = (payload[i + 2].toInt() xor m2).toByte()
+                                payload[i + 3] = (payload[i + 3].toInt() xor m3).toByte()
+                                i += 4
+                            }
+                            while (i < payload.size) {
+                                payload[i] = (payload[i].toInt() xor maskKey[i and 3].toInt()).toByte()
+                                i++
+                            }
+                        }
+
+                        when (opcode) {
+                            0x8 -> { // Close
+                                closed.set(true)
+                                eval.unregisterResource(sock)
+                                try { writeFrameBlocking(0x8, ByteArray(0)) } catch (_: Exception) {}
+                                try { sock.close() } catch (_: Exception) {}
+                                return null
+                            }
+                            0x9 -> { // Ping -> respond with Pong
+                                try { writeFrameBlocking(0xA, payload) } catch (_: Exception) {}
+                            }
+                            0xA -> { /* Pong -> ignore */ }
+                            0x0, 0x1, 0x2 -> {
+                                if (opcode != 0x0) msgOpcode = opcode
+                                if (fin && fragOut == null) {
+                                    // Fast zero-copy path for unfragmented single-frame messages (99.9% of traffic)
+                                    return if (msgOpcode == 0x1) PyStr(String(payload, Charsets.UTF_8)) else PyBytes(payload)
+                                }
+                                if (fragOut == null) fragOut = ByteArrayOutputStream(payload.size * 2)
+                                fragOut.write(payload)
+                                if (fin) {
+                                    val data = fragOut.toByteArray()
+                                    return if (msgOpcode == 0x1) PyStr(String(data, Charsets.UTF_8)) else PyBytes(data)
+                                }
                             }
                         }
                     }
+                } finally {
+                    if (deadline != null) try { sock.soTimeout = 0 } catch (_: Exception) {}
                 }
                 return null
             }
@@ -925,25 +1042,31 @@ object PyNetworkStdLib {
             PyBuiltins.requireArgs("ws.send", args, 1)
             val arg = args[0]
             PyCoroutine("ws.send") {
-                if (arg is PyStr) {
-                    writeFrame(0x1, arg.value.toByteArray(Charsets.UTF_8))
-                } else {
-                    writeFrame(0x2, PyMethods.extractBytes(arg))
+                withContext(netDispatcher) {
+                    if (arg is PyStr) {
+                        writeFrameBlocking(0x1, arg.value.toByteArray(Charsets.UTF_8))
+                    } else {
+                        writeFrameBlocking(0x2, PyMethods.extractBytes(arg))
+                    }
                 }
                 PyNone
             }
         }
         ws.fields["recv"] = PyNativeFunction("recv") { _, _, _ ->
             PyCoroutine("ws.recv") {
-                readMessage() ?: throw PyException("ConnectionError", "WebSocket connection closed")
+                val deadline = currentCoroutineContext()[PyWaitDeadline]
+                val msg = withContext(netDispatcher) { readMessageBlocking(deadline) }
+                msg ?: throw PyException("ConnectionError", "WebSocket connection closed")
             }
         }
         ws.fields["close"] = PyNativeFunction("close") { _, _, _ ->
             PyCoroutine("ws.close") {
-                if (!closed) {
-                    closed = true
-                    try { writeFrame(0x8, ByteArray(0)) } catch (_: Exception) {}
-                    try { sock.close() } catch (_: Exception) {}
+                if (closed.compareAndSet(false, true)) {
+                    eval.unregisterResource(sock)
+                    withContext(netDispatcher) {
+                        try { writeFrameBlocking(0x8, ByteArray(0)) } catch (_: Exception) {}
+                        try { sock.close() } catch (_: Exception) {}
+                    }
                 }
                 PyNone
             }
@@ -951,7 +1074,9 @@ object PyNetworkStdLib {
         ws.fields["__aiter__"] = PyNativeFunction("__aiter__") { _, _, _ -> ws }
         ws.fields["__anext__"] = PyNativeFunction("__anext__") { _, _, _ ->
             PyCoroutine("ws.__anext__") {
-                readMessage() ?: throw PyException("StopAsyncIteration", "")
+                val deadline = currentCoroutineContext()[PyWaitDeadline]
+                val msg = withContext(netDispatcher) { readMessageBlocking(deadline) }
+                msg ?: throw PyException("StopAsyncIteration", "")
             }
         }
         ws.fields["__aenter__"] = PyNativeFunction("__aenter__") { _, _, _ ->
@@ -959,8 +1084,8 @@ object PyNetworkStdLib {
         }
         ws.fields["__aexit__"] = PyNativeFunction("__aexit__") { _, _, _ ->
             PyCoroutine("ws.__aexit__") {
-                if (!closed) {
-                    closed = true
+                if (closed.compareAndSet(false, true)) {
+                    eval.unregisterResource(sock)
                     try { sock.close() } catch (_: Exception) {}
                 }
                 PyNone

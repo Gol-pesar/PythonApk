@@ -32,8 +32,18 @@ class PythonSyntaxTransformation(
         "Exception", "ValueError", "TypeError", "KeyError", "IndexError", "ZeroDivisionError"
     )
 
+    private var lastSource: String? = null
+    private var lastTransformed: TransformedText? = null
+
     override fun filter(text: AnnotatedString): TransformedText {
-        return TransformedText(highlight(text.text), OffsetMapping.Identity)
+        val raw = text.text
+        if (raw == lastSource) {
+            lastTransformed?.let { return it }
+        }
+        val transformed = TransformedText(highlight(raw), OffsetMapping.Identity)
+        lastSource = raw
+        lastTransformed = transformed
+        return transformed
     }
 
     fun highlight(source: String): AnnotatedString = buildAnnotatedString {

@@ -47,22 +47,133 @@ class PyBool private constructor(val value: Boolean) : PyValue() {
     }
 }
 
-class PyInt(val value: BigInteger) : PyValue() {
-    constructor(v: Long) : this(BigInteger.valueOf(v))
-    constructor(v: Int) : this(BigInteger.valueOf(v.toLong()))
+class PyInt private constructor(
+    private var _value: BigInteger?,
+    val rawLeBytes: ByteArray?
+) : PyValue() {
+    constructor(v: BigInteger) : this(v, null)
+    constructor(v: Long) : this(BigInteger.valueOf(v), null)
+    constructor(v: Int) : this(BigInteger.valueOf(v.toLong()), null)
+
+    val value: BigInteger
+        get() {
+            val cached = _value
+            if (cached != null) return cached
+            val raw = rawLeBytes ?: return BigInteger.ZERO
+            if (raw.isEmpty()) {
+                _value = BigInteger.ZERO
+                return BigInteger.ZERO
+            }
+            val be = ByteArray(raw.size)
+            var i = 0
+            var j = raw.size - 1
+            while (j >= 0) {
+                be[i++] = raw[j--]
+            }
+            val bi = BigInteger(1, be)
+            _value = bi
+            return bi
+        }
 
     override val typeName: String = "int"
-    override fun toBool(): Boolean = value != BigInteger.ZERO
+    override fun toBool(): Boolean {
+        val raw = rawLeBytes
+        if (_value == null && raw != null) {
+            for (b in raw) if (b.toInt() != 0) return true
+            return false
+        }
+        return value != BigInteger.ZERO
+    }
     override fun toReprString(): String = value.toString()
     override fun asBigInt(): BigInteger = value
     override fun asDouble(): Double = value.toDouble()
     override fun pyEquals(other: PyValue): Boolean = when (other) {
-        is PyInt -> value == other.value
+        is PyInt -> {
+            if (_value == null && other._value == null && rawLeBytes != null && other.rawLeBytes != null) {
+                unsignedLeEquals(rawLeBytes, other.rawLeBytes)
+            } else {
+                value == other.value
+            }
+        }
         is PyBool -> value == other.asBigInt()
         is PyFloat -> value.toDouble() == other.value && floor(other.value) == other.value
         else -> false
     }
     override fun pyHash(): Int = value.hashCode()
+
+    companion object {
+        private val SMALL_INTS = Array(385) { idx ->
+            PyInt(BigInteger.valueOf((idx - 128).toLong()), null)
+        }
+
+        fun of(v: Long): PyInt =
+            if (v in -128L..256L) SMALL_INTS[(v + 128).toInt()] else PyInt(BigInteger.valueOf(v), null)
+
+        fun of(v: Int): PyInt =
+            if (v in -128..256) SMALL_INTS[v + 128] else PyInt(BigInteger.valueOf(v.toLong()), null)
+
+        fun fromUnsignedLeBytes(bytes: ByteArray): PyInt = PyInt(null, bytes)
+
+        fun unsignedLeEquals(a: ByteArray, b: ByteArray): Boolean {
+            val maxLen = maxOf(a.size, b.size)
+            for (i in 0 until maxLen) {
+                val av = if (i < a.size) a[i].toInt() else 0
+                val bv = if (i < b.size) b[i].toInt() else 0
+                if (av != bv) return false
+            }
+            return true
+        }
+
+        fun xorUnsignedLe(a: ByteArray, b: ByteArray): ByteArray {
+            val len = maxOf(a.size, b.size)
+            val out = ByteArray(len)
+            val minLen = minOf(a.size, b.size)
+            var i = 0
+            while (i + 7 < minLen) {
+                out[i] = (a[i].toInt() xor b[i].toInt()).toByte()
+                out[i + 1] = (a[i + 1].toInt() xor b[i + 1].toInt()).toByte()
+                out[i + 2] = (a[i + 2].toInt() xor b[i + 2].toInt()).toByte()
+                out[i + 3] = (a[i + 3].toInt() xor b[i + 3].toInt()).toByte()
+                out[i + 4] = (a[i + 4].toInt() xor b[i + 4].toInt()).toByte()
+                out[i + 5] = (a[i + 5].toInt() xor b[i + 5].toInt()).toByte()
+                out[i + 6] = (a[i + 6].toInt() xor b[i + 6].toInt()).toByte()
+                out[i + 7] = (a[i + 7].toInt() xor b[i + 7].toInt()).toByte()
+                i += 8
+            }
+            while (i < minLen) {
+                out[i] = (a[i].toInt() xor b[i].toInt()).toByte()
+                i++
+            }
+            if (a.size > minLen) System.arraycopy(a, minLen, out, minLen, a.size - minLen)
+            else if (b.size > minLen) System.arraycopy(b, minLen, out, minLen, b.size - minLen)
+            return out
+        }
+
+        fun andUnsignedLe(a: ByteArray, b: ByteArray): ByteArray {
+            val minLen = minOf(a.size, b.size)
+            val out = ByteArray(minLen)
+            var i = 0
+            while (i < minLen) {
+                out[i] = (a[i].toInt() and b[i].toInt()).toByte()
+                i++
+            }
+            return out
+        }
+
+        fun orUnsignedLe(a: ByteArray, b: ByteArray): ByteArray {
+            val len = maxOf(a.size, b.size)
+            val out = ByteArray(len)
+            val minLen = minOf(a.size, b.size)
+            var i = 0
+            while (i < minLen) {
+                out[i] = (a[i].toInt() or b[i].toInt()).toByte()
+                i++
+            }
+            if (a.size > minLen) System.arraycopy(a, minLen, out, minLen, a.size - minLen)
+            else if (b.size > minLen) System.arraycopy(b, minLen, out, minLen, b.size - minLen)
+            return out
+        }
+    }
 }
 
 class PyFloat(val value: Double) : PyValue() {
@@ -131,7 +242,7 @@ class PyBytes(val data: ByteArray) : PyValue() {
 }
 
 class PyMemoryView(
-    private val backing: ByteArray,
+    internal val backing: ByteArray,
     val offset: Int = 0,
     val length: Int = backing.size - offset
 ) : PyValue() {
