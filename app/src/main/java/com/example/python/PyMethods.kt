@@ -4,6 +4,10 @@ object PyMethods {
 
     fun getBuiltinMethod(obj: PyValue, name: String): PyValue? = when (obj) {
         is PyStr -> getStrMethod(obj, name)
+        is PyBytes -> getBytesMethod(obj, name)
+        is PyMemoryView -> getMemoryViewMethod(obj, name)
+        is PyInt -> getIntMethod(obj, name)
+        is PyNativeFunction -> getNativeTypeMethod(obj, name)
         is PyList -> getListMethod(obj, name)
         is PyTuple -> getTupleMethod(obj, name)
         is PyDict -> getDictMethod(obj, name)
@@ -143,7 +147,139 @@ object PyMethods {
                 sb.append(text, lastEnd, text.length)
                 PyStr(sb.toString())
             }
+            "encode" -> PyNativeFunction("encode") { _, args, kwargs ->
+                val enc = ((kwargs["encoding"] ?: args.firstOrNull()) as? PyStr)?.value?.lowercase() ?: "utf-8"
+                val charset = when (enc) {
+                    "latin-1", "latin1", "iso-8859-1" -> Charsets.ISO_8859_1
+                    "ascii" -> Charsets.US_ASCII
+                    else -> Charsets.UTF_8
+                }
+                PyBytes(text.toByteArray(charset))
+            }
             else -> null
+        }
+    }
+
+    private fun getBytesMethod(b: PyBytes, name: String): PyValue? = when (name) {
+        "decode" -> PyNativeFunction("decode") { _, args, kwargs ->
+            val enc = ((kwargs["encoding"] ?: args.firstOrNull()) as? PyStr)?.value?.lowercase() ?: "utf-8"
+            val charset = when (enc) {
+                "latin-1", "latin1", "iso-8859-1" -> Charsets.ISO_8859_1
+                "ascii" -> Charsets.US_ASCII
+                else -> Charsets.UTF_8
+            }
+            PyStr(String(b.data, charset))
+        }
+        "hex" -> PyNativeFunction("hex") { _, _, _ ->
+            PyStr(b.data.joinToString("") { "%02x".format(it.toInt() and 0xFF) })
+        }
+        "startswith" -> PyNativeFunction("startswith") { _, args, _ ->
+            val prefix = extractBytes(args[0])
+            val ok = b.data.size >= prefix.size && prefix.indices.all { b.data[it] == prefix[it] }
+            PyBool.of(ok)
+        }
+        "endswith" -> PyNativeFunction("endswith") { _, args, _ ->
+            val suffix = extractBytes(args[0])
+            val off = b.data.size - suffix.size
+            val ok = off >= 0 && suffix.indices.all { b.data[off + it] == suffix[it] }
+            PyBool.of(ok)
+        }
+        else -> null
+    }
+
+    private fun getMemoryViewMethod(mv: PyMemoryView, name: String): PyValue? = when (name) {
+        "tobytes" -> PyNativeFunction("tobytes") { _, _, _ -> PyBytes(mv.toByteArray()) }
+        "tolist" -> PyNativeFunction("tolist") { _, _, _ ->
+            PyList(mv.toByteArray().map { PyInt(it.toInt() and 0xFF) }.toMutableList())
+        }
+        "hex" -> PyNativeFunction("hex") { _, _, _ ->
+            PyStr(mv.toByteArray().joinToString("") { "%02x".format(it.toInt() and 0xFF) })
+        }
+        else -> null
+    }
+
+    private fun getIntMethod(num: PyInt, name: String): PyValue? = when (name) {
+        "to_bytes" -> PyNativeFunction("to_bytes") { _, args, kwargs ->
+            val length = (kwargs["length"] ?: args.getOrNull(0))?.asBigInt()?.toInt() ?: 1
+            val byteorder = ((kwargs["byteorder"] ?: args.getOrNull(1)) as? PyStr)?.value ?: "big"
+            val signed = (kwargs["signed"] ?: args.getOrNull(2))?.toBool() ?: false
+            PyBytes(bigIntToBytes(num.value, length, byteorder, signed))
+        }
+        "bit_length" -> PyNativeFunction("bit_length") { _, _, _ ->
+            PyInt(num.value.abs().bitLength())
+        }
+        else -> null
+    }
+
+    private fun getNativeTypeMethod(fn: PyNativeFunction, name: String): PyValue? {
+        if (fn.name == "int" && name == "from_bytes") {
+            return PyNativeFunction("from_bytes") { _, args, kwargs ->
+                val raw = extractBytes(args[0])
+                val byteorder = ((kwargs["byteorder"] ?: args.getOrNull(1)) as? PyStr)?.value ?: "big"
+                val signed = (kwargs["signed"] ?: args.getOrNull(2))?.toBool() ?: false
+                PyInt(bytesToBigInt(raw, byteorder, signed))
+            }
+        }
+        if (fn.name == "bytes" && name == "fromhex") {
+            return PyNativeFunction("fromhex") { _, args, _ ->
+                val hex = (args[0] as PyStr).value.replace(Regex("\\s+"), "")
+                if (hex.length % 2 != 0) throw PyException("ValueError", "non-hexadecimal number found in fromhex()")
+                val out = ByteArray(hex.length / 2) { i ->
+                    hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+                }
+                PyBytes(out)
+            }
+        }
+        return null
+    }
+
+    fun extractBytes(v: PyValue): ByteArray = when (v) {
+        is PyBytes -> v.data
+        is PyMemoryView -> v.toByteArray()
+        is PyStr -> v.value.toByteArray(Charsets.UTF_8)
+        else -> throw PyException("TypeError", "a bytes-like object is required, not '${v.typeName}'")
+    }
+
+    fun bytesToBigInt(bytes: ByteArray, byteorder: String, signed: Boolean): java.math.BigInteger {
+        if (bytes.isEmpty()) return java.math.BigInteger.ZERO
+        val bigEndian = when (byteorder) {
+            "big" -> bytes
+            "little" -> bytes.reversedArray()
+            else -> throw PyException("ValueError", "byteorder must be either 'little' or 'big'")
+        }
+        return if (signed) java.math.BigInteger(bigEndian) else java.math.BigInteger(1, bigEndian)
+    }
+
+    fun bigIntToBytes(value: java.math.BigInteger, length: Int, byteorder: String, signed: Boolean): ByteArray {
+        if (length < 0) throw PyException("ValueError", "length argument must be non-negative")
+        if (!signed && value.signum() < 0) throw PyException("OverflowError", "can't convert negative int to unsigned")
+        if (length == 0) {
+            if (value == java.math.BigInteger.ZERO) return ByteArray(0)
+            throw PyException("OverflowError", "int too big to convert")
+        }
+        val raw = value.toByteArray()
+        val bigEndian = ByteArray(length)
+        if (signed && value.signum() < 0) {
+            bigEndian.fill(0xFF.toByte())
+        }
+        // Copy least-significant bytes from raw into bigEndian
+        val srcStart = if (!signed && raw.size > 1 && raw[0] == 0.toByte() && raw.size - 1 <= length) 1 else 0
+        val copyLen = raw.size - srcStart
+        if (copyLen > length) {
+            // Allow leading sign/zero bytes if they fit
+            val trimStart = raw.size - length
+            val padByte: Byte = if (signed && value.signum() < 0) 0xFF.toByte() else 0x00.toByte()
+            for (i in 0 until trimStart) {
+                if (raw[i] != padByte) throw PyException("OverflowError", "int too big to convert")
+            }
+            System.arraycopy(raw, trimStart, bigEndian, 0, length)
+        } else {
+            System.arraycopy(raw, srcStart, bigEndian, length - copyLen, copyLen)
+        }
+        return when (byteorder) {
+            "big" -> bigEndian
+            "little" -> bigEndian.reversedArray()
+            else -> throw PyException("ValueError", "byteorder must be either 'little' or 'big'")
         }
     }
 

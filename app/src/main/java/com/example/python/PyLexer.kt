@@ -186,6 +186,7 @@ class PyLexer(
         }
         val isRaw = prefix.contains('r')
         val isFString = prefix.contains('f')
+        val isBytes = prefix.contains('b')
 
         val quote = source[pos]
         val triple = peek(1) == quote && peek(2) == quote
@@ -195,21 +196,25 @@ class PyLexer(
             advance()
         }
 
+        val tokenType = when {
+            isBytes -> TokenType.BYTES
+            isFString -> TokenType.FSTRING
+            else -> TokenType.STRING
+        }
+
         val sb = StringBuilder()
         while (pos < source.length) {
             val c = source[pos]
             if (triple) {
                 if (c == quote && peek(1) == quote && peek(2) == quote) {
                     advance(); advance(); advance()
-                    val type = if (isFString) TokenType.FSTRING else TokenType.STRING
-                    tokens.add(PyToken(type, sb.toString(), startLine, startCol))
+                    tokens.add(PyToken(tokenType, sb.toString(), startLine, startCol))
                     return
                 }
             } else {
                 if (c == quote) {
                     advance()
-                    val type = if (isFString) TokenType.FSTRING else TokenType.STRING
-                    tokens.add(PyToken(type, sb.toString(), startLine, startCol))
+                    tokens.add(PyToken(tokenType, sb.toString(), startLine, startCol))
                     return
                 }
                 if (c == '\n') {

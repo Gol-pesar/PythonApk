@@ -102,6 +102,65 @@ class PyStr(val value: String) : PyValue() {
     override fun pyHash(): Int = value.hashCode()
 }
 
+class PyBytes(val data: ByteArray) : PyValue() {
+    override val typeName: String = "bytes"
+    override fun toBool(): Boolean = data.isNotEmpty()
+    override fun toReprString(): String {
+        val sb = StringBuilder("b'")
+        for (b in data) {
+            val v = b.toInt() and 0xFF
+            when (v) {
+                '\\'.code -> sb.append("\\\\")
+                '\''.code -> sb.append("\\'")
+                '\n'.code -> sb.append("\\n")
+                '\r'.code -> sb.append("\\r")
+                '\t'.code -> sb.append("\\t")
+                in 32..126 -> sb.append(v.toChar())
+                else -> sb.append("\\x%02x".format(v))
+            }
+        }
+        sb.append('\'')
+        return sb.toString()
+    }
+    override fun pyEquals(other: PyValue): Boolean = when (other) {
+        is PyBytes -> data.contentEquals(other.data)
+        is PyMemoryView -> data.contentEquals(other.toByteArray())
+        else -> false
+    }
+    override fun pyHash(): Int = data.contentHashCode()
+}
+
+class PyMemoryView(
+    private val backing: ByteArray,
+    val offset: Int = 0,
+    val length: Int = backing.size - offset
+) : PyValue() {
+    override val typeName: String = "memoryview"
+    override fun toBool(): Boolean = length > 0
+    override fun toReprString(): String = "<memory at 0x${System.identityHashCode(this).toString(16)}>"
+    fun byteAt(index: Int): Int = backing[offset + index].toInt() and 0xFF
+    fun toByteArray(): ByteArray = backing.copyOfRange(offset, offset + length)
+    fun slice(start: Int, end: Int): PyMemoryView {
+        val s = start.coerceIn(0, length)
+        val e = end.coerceIn(s, length)
+        return PyMemoryView(backing, offset + s, e - s)
+    }
+    override fun pyEquals(other: PyValue): Boolean = when (other) {
+        is PyMemoryView -> toByteArray().contentEquals(other.toByteArray())
+        is PyBytes -> toByteArray().contentEquals(other.data)
+        else -> false
+    }
+}
+
+class PyCoroutine(
+    val name: String,
+    private val block: suspend () -> PyValue
+) : PyValue() {
+    override val typeName: String = "coroutine"
+    override fun toReprString(): String = "<coroutine object $name>"
+    suspend fun awaitResult(): PyValue = block()
+}
+
 class PyList(val elements: MutableList<PyValue>) : PyValue() {
     override val typeName: String = "list"
     override fun toBool(): Boolean = elements.isNotEmpty()
@@ -259,7 +318,8 @@ class PyFunction(
     val closure: PyEnvironment,
     val isGenerator: Boolean = false,
     val defaults: Map<String, PyValue> = emptyMap(),
-    val doc: String? = null
+    val doc: String? = null,
+    val isAsync: Boolean = false
 ) : PyValue() {
     override val typeName: String = "function"
     override fun toReprString(): String = "<function $name>"

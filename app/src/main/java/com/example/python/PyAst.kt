@@ -26,6 +26,7 @@ sealed class Expr {
     data class SliceExpr(val start: Expr?, val stop: Expr?, val step: Expr?, override val line: Int) : Expr()
     data class Call(val callee: Expr, val args: List<CallArg>, override val line: Int) : Expr()
     data class Lambda(val params: List<PyParam>, val body: Expr, override val line: Int) : Expr()
+    data class Await(val value: Expr, override val line: Int) : Expr()
 }
 
 data class DictEntry(val key: Expr?, val value: Expr) // key == null means **value unpacking
@@ -93,7 +94,8 @@ sealed class Stmt {
         val iterable: Expr,
         val body: List<Stmt>,
         val elseBody: List<Stmt>,
-        override val line: Int
+        override val line: Int,
+        val isAsync: Boolean = false
     ) : Stmt()
 
     data class FuncDef(
@@ -101,7 +103,8 @@ sealed class Stmt {
         val params: List<PyParam>,
         val body: List<Stmt>,
         val decorators: List<Expr>,
-        override val line: Int
+        override val line: Int,
+        val isAsync: Boolean = false
     ) : Stmt()
 
     data class ClassDef(
@@ -123,7 +126,8 @@ sealed class Stmt {
     data class WithStmt(
         val items: List<Pair<Expr, AssignTarget?>>,
         val body: List<Stmt>,
-        override val line: Int
+        override val line: Int,
+        val isAsync: Boolean = false
     ) : Stmt()
 
     data class ImportStmt(

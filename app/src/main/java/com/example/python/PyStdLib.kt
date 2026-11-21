@@ -15,7 +15,8 @@ object PyStdLib {
     val availableModules: List<String> = listOf(
         "sys", "os", "os.path", "math", "random", "json", "datetime",
         "time", "re", "collections", "itertools", "functools", "statistics",
-        "string", "hashlib", "base64", "pathlib", "profiling", "sentinels", "typing"
+        "string", "hashlib", "hmac", "struct", "socket", "asyncio", "websockets",
+        "base64", "pathlib", "profiling", "sentinels", "typing"
     )
 
     fun loadModule(name: String, workspaceDir: File, evaluator: PyEvaluator): PyModule? {
@@ -35,6 +36,11 @@ object PyStdLib {
             "statistics" -> createStatisticsModule()
             "string" -> createStringModule()
             "hashlib" -> createHashlibModule()
+            "hmac" -> PyNetworkStdLib.createHmacModule()
+            "struct" -> PyNetworkStdLib.createStructModule()
+            "socket" -> PyNetworkStdLib.createSocketModule()
+            "asyncio" -> PyNetworkStdLib.createAsyncioModule()
+            "websockets" -> PyNetworkStdLib.createWebSocketsModule()
             "base64" -> createBase64Module()
             "pathlib" -> createPathlibModule(workspaceDir)
             "profiling", "profiling.sampling" -> createProfilingModule()
@@ -104,6 +110,14 @@ object PyStdLib {
             if (!f.exists()) throw PyException("FileNotFoundError", "No such file: '$p'")
             f.delete()
             PyNone
+        }
+        mod.members["urandom"] = PyNativeFunction("urandom") { _, args, _ ->
+            PyBuiltins.requireArgs("urandom", args, 1)
+            val n = PyBuiltins.requireInt("urandom", args[0]).toInt()
+            if (n < 0) throw PyException("ValueError", "negative argument not allowed")
+            val buf = ByteArray(n)
+            java.security.SecureRandom().nextBytes(buf)
+            PyBytes(buf)
         }
         return mod
     }
@@ -650,16 +664,29 @@ object PyStdLib {
     private fun createHashlibModule(): PyModule {
         val mod = PyModule("hashlib")
         fun makeHashFn(algo: String, pyName: String) = PyNativeFunction(pyName) { _, args, _ ->
-            val input = (args.firstOrNull() as? PyStr)?.value ?: ""
-            val digest = MessageDigest.getInstance(algo).digest(input.toByteArray(Charsets.UTF_8))
-            val hex = digest.joinToString("") { "%02x".format(it) }
+            val buffer = java.io.ByteArrayOutputStream()
+            args.firstOrNull()?.let { buffer.write(PyMethods.extractBytes(it)) }
+            fun computeDigest(): ByteArray {
+                val md = MessageDigest.getInstance(algo)
+                return md.digest(buffer.toByteArray())
+            }
             val cls = PyClass("HASH", emptyList())
             val inst = PyInstance(cls)
-            inst.fields["hexdigest"] = PyNativeFunction("hexdigest") { _, _, _ -> PyStr(hex) }
+            inst.fields["update"] = PyNativeFunction("update") { _, uArgs, _ ->
+                buffer.write(PyMethods.extractBytes(uArgs[0]))
+                PyNone
+            }
+            inst.fields["digest"] = PyNativeFunction("digest") { _, _, _ ->
+                PyBytes(computeDigest())
+            }
+            inst.fields["hexdigest"] = PyNativeFunction("hexdigest") { _, _, _ ->
+                PyStr(computeDigest().joinToString("") { "%02x".format(it.toInt() and 0xFF) })
+            }
             inst.fields["name"] = PyStr(pyName)
             inst
         }
         mod.members["sha256"] = makeHashFn("SHA-256", "sha256")
+        mod.members["sha512"] = makeHashFn("SHA-512", "sha512")
         mod.members["sha1"] = makeHashFn("SHA-1", "sha1")
         mod.members["md5"] = makeHashFn("MD5", "md5")
         return mod

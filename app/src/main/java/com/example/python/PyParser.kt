@@ -37,16 +37,20 @@ class PyParser(
         return when (tok.type) {
             TokenType.IF -> listOf(parseIf())
             TokenType.WHILE -> listOf(parseWhile())
-            TokenType.FOR -> listOf(parseFor())
-            TokenType.DEF -> listOf(parseFuncDef(emptyList()))
+            TokenType.FOR -> listOf(parseFor(isAsync = false))
+            TokenType.DEF -> listOf(parseFuncDef(emptyList(), isAsync = false))
             TokenType.ASYNC -> {
                 advance()
-                if (check(TokenType.DEF)) listOf(parseFuncDef(emptyList()))
-                else throw syntaxError("expected 'def' after 'async'")
+                when (current().type) {
+                    TokenType.DEF -> listOf(parseFuncDef(emptyList(), isAsync = true))
+                    TokenType.FOR -> listOf(parseFor(isAsync = true))
+                    TokenType.WITH -> listOf(parseWith(isAsync = true))
+                    else -> throw syntaxError("expected 'def', 'for', or 'with' after 'async'")
+                }
             }
             TokenType.CLASS -> listOf(parseClassDef(emptyList()))
             TokenType.TRY -> listOf(parseTry())
-            TokenType.WITH -> listOf(parseWith())
+            TokenType.WITH -> listOf(parseWith(isAsync = false))
             else -> parseSimpleStmtLine()
         }
     }
@@ -217,10 +221,10 @@ class PyParser(
             skipNewlines()
         }
         return when (current().type) {
-            TokenType.DEF -> parseFuncDef(decorators)
+            TokenType.DEF -> parseFuncDef(decorators, isAsync = false)
             TokenType.ASYNC -> {
                 advance()
-                parseFuncDef(decorators)
+                parseFuncDef(decorators, isAsync = true)
             }
             TokenType.CLASS -> parseClassDef(decorators)
             else -> throw syntaxError("expected 'def' or 'class' after decorator")
@@ -306,7 +310,7 @@ class PyParser(
         return Stmt.While(cond, body, elseBody, line)
     }
 
-    private fun parseFor(): Stmt.For {
+    private fun parseFor(isAsync: Boolean = false): Stmt.For {
         val line = expect(TokenType.FOR, "expected 'for'").line
         val target = parseTargetList()
         expect(TokenType.IN, "expected 'in' in for loop")
@@ -318,10 +322,10 @@ class PyParser(
             expect(TokenType.COLON, "expected ':' after else")
             parseSuite()
         } else emptyList()
-        return Stmt.For(target, iterable, body, elseBody, line)
+        return Stmt.For(target, iterable, body, elseBody, line, isAsync = isAsync)
     }
 
-    private fun parseFuncDef(decorators: List<Expr>): Stmt.FuncDef {
+    private fun parseFuncDef(decorators: List<Expr>, isAsync: Boolean = false): Stmt.FuncDef {
         val line = expect(TokenType.DEF, "expected 'def'").line
         val name = expect(TokenType.IDENTIFIER, "expected function name").lexeme
         expect(TokenType.LPAREN, "expected '(' after function name")
@@ -332,7 +336,7 @@ class PyParser(
         }
         expect(TokenType.COLON, "expected ':' after function signature")
         val body = parseSuite()
-        return Stmt.FuncDef(name, params, body, decorators, line)
+        return Stmt.FuncDef(name, params, body, decorators, line, isAsync = isAsync)
     }
 
     private fun parseClassDef(decorators: List<Expr>): Stmt.ClassDef {
@@ -385,7 +389,7 @@ class PyParser(
         return Stmt.TryStmt(body, handlers, elseBody, finallyBody, line)
     }
 
-    private fun parseWith(): Stmt.WithStmt {
+    private fun parseWith(isAsync: Boolean = false): Stmt.WithStmt {
         val line = expect(TokenType.WITH, "expected 'with'").line
         val items = mutableListOf<Pair<Expr, AssignTarget?>>()
         do {
@@ -395,7 +399,7 @@ class PyParser(
         } while (match(TokenType.COMMA))
         expect(TokenType.COLON, "expected ':' after with")
         val body = parseSuite()
-        return Stmt.WithStmt(items, body, line)
+        return Stmt.WithStmt(items, body, line, isAsync = isAsync)
     }
 
     private fun parseMatch(): Stmt.MatchStmt {
@@ -702,8 +706,8 @@ class PyParser(
             return Expr.Unary(tok.lexeme, parseUnary(), tok.line)
         }
         if (check(TokenType.AWAIT)) {
-            advance()
-            return parseUnary()
+            val tok = advance()
+            return Expr.Await(parseUnary(), tok.line)
         }
         return parsePower()
     }
@@ -827,6 +831,15 @@ class PyParser(
             TokenType.FSTRING -> {
                 advance()
                 Expr.FString(tok.lexeme, tok.line)
+            }
+            TokenType.BYTES -> {
+                advance()
+                val sb = StringBuilder(tok.lexeme)
+                while (check(TokenType.BYTES)) {
+                    sb.append(advance().lexeme)
+                }
+                val bytes = ByteArray(sb.length) { idx -> (sb[idx].code and 0xFF).toByte() }
+                Expr.Literal(PyBytes(bytes), tok.line)
             }
             TokenType.TRUE -> { advance(); Expr.Literal(PyBool.TRUE, tok.line) }
             TokenType.FALSE -> { advance(); Expr.Literal(PyBool.FALSE, tok.line) }

@@ -16,10 +16,11 @@ class PyEvaluator(
     private val onInput: suspend (prompt: String) -> String
 ) {
     val globalEnv = PyEnvironment(isModuleRoot = true)
+    @Volatile
     var currentEnv: PyEnvironment = globalEnv
         private set
-    private val moduleCache = mutableMapOf<String, PyModule>()
-    private var stepCounter = 0
+    private val moduleCache = java.util.concurrent.ConcurrentHashMap<String, PyModule>()
+    private val stepCounter = java.util.concurrent.atomic.AtomicInteger(0)
     private var activeFileName = "<main>"
 
     init {
@@ -39,7 +40,7 @@ class PyEvaluator(
 
     suspend fun executeScript(source: String, fileName: String = "main.py"): PyValue {
         activeFileName = fileName
-        stepCounter = 0
+        stepCounter.set(0)
         globalEnv.defineLocal("__file__", PyStr(fileName))
         val tokens = PyLexer(source, fileName).tokenize()
         val stmts = PyParser(tokens, fileName).parseProgram()
@@ -52,7 +53,7 @@ class PyEvaluator(
 
     suspend fun executeRepl(source: String): PyValue? {
         activeFileName = "<stdin>"
-        stepCounter = 0
+        stepCounter.set(0)
         val tokens = PyLexer(source, "<stdin>").tokenize()
         val stmts = PyParser(tokens, "<stdin>").parseProgram()
         if (stmts.size == 1 && stmts[0] is Stmt.ExprStmt) {
@@ -67,13 +68,10 @@ class PyEvaluator(
     }
 
     private suspend fun tick() {
-        stepCounter++
-        if (stepCounter % 256 == 0) {
+        val count = stepCounter.incrementAndGet()
+        if ((count and 255) == 0) {
             currentCoroutineContext().ensureActive()
             yield()
-        }
-        if (stepCounter > 2_000_000) {
-            throw PyException("RuntimeError", "Execution step limit reached (possible infinite loop)")
         }
     }
 
@@ -160,17 +158,44 @@ class PyEvaluator(
                     PyNone
                 }
                 is Stmt.For -> {
-                    val items = toIterableList(evalExpr(stmt.iterable, env))
                     var broke = false
-                    for (item in items) {
-                        tick()
-                        assignTarget(stmt.target, item, env, stmt.line)
-                        try {
-                            execBlock(stmt.body, env)
-                        } catch (_: BreakSignal) {
-                            broke = true; break
-                        } catch (_: ContinueSignal) {
-                            continue
+                    if (stmt.isAsync) {
+                        val iterableObj = evalExpr(stmt.iterable, env)
+                        val aiterFn = try { getAttribute(iterableObj, "__aiter__", stmt.line) } catch (_: PyException) { null }
+                        val asyncIter = if (aiterFn != null) {
+                            val r = callValue(aiterFn, emptyList(), emptyMap(), stmt.line)
+                            if (r is PyCoroutine) r.awaitResult() else r
+                        } else iterableObj
+                        val anextFn = getAttribute(asyncIter, "__anext__", stmt.line)
+                        while (true) {
+                            tick()
+                            val nextItem = try {
+                                val r = callValue(anextFn, emptyList(), emptyMap(), stmt.line)
+                                if (r is PyCoroutine) r.awaitResult() else r
+                            } catch (e: PyException) {
+                                if (e.typeName == "StopAsyncIteration") break else throw e
+                            }
+                            assignTarget(stmt.target, nextItem, env, stmt.line)
+                            try {
+                                execBlock(stmt.body, env)
+                            } catch (_: BreakSignal) {
+                                broke = true; break
+                            } catch (_: ContinueSignal) {
+                                continue
+                            }
+                        }
+                    } else {
+                        val items = toIterableList(evalExpr(stmt.iterable, env))
+                        for (item in items) {
+                            tick()
+                            assignTarget(stmt.target, item, env, stmt.line)
+                            try {
+                                execBlock(stmt.body, env)
+                            } catch (_: BreakSignal) {
+                                broke = true; break
+                            } catch (_: ContinueSignal) {
+                                continue
+                            }
                         }
                     }
                     if (!broke) execBlock(stmt.elseBody, env)
@@ -188,9 +213,10 @@ class PyEvaluator(
                         params = stmt.params,
                         body = stmt.body,
                         closure = env,
-                        isGenerator = containsYield(stmt.body),
+                        isGenerator = !stmt.isAsync && containsYield(stmt.body),
                         defaults = defaults,
-                        doc = doc
+                        doc = doc,
+                        isAsync = stmt.isAsync
                     )
                     for (dec in stmt.decorators.asReversed()) {
                         val decFn = evalExpr(dec, env)
@@ -245,20 +271,26 @@ class PyEvaluator(
                     PyNone
                 }
                 is Stmt.WithStmt -> {
+                    val enterAttr = if (stmt.isAsync) "__aenter__" else "__enter__"
+                    val exitAttr = if (stmt.isAsync) "__aexit__" else "__exit__"
                     val managers = mutableListOf<PyValue>()
                     for ((ctxExpr, target) in stmt.items) {
                         val mgr = evalExpr(ctxExpr, env)
                         managers.add(mgr)
-                        val enterFn = try { getAttribute(mgr, "__enter__", stmt.line) } catch (_: PyException) { null }
-                        val bound = if (enterFn != null) callValue(enterFn, emptyList(), emptyMap(), stmt.line) else mgr
+                        val enterFn = try { getAttribute(mgr, enterAttr, stmt.line) } catch (_: PyException) { null }
+                        var bound = if (enterFn != null) callValue(enterFn, emptyList(), emptyMap(), stmt.line) else mgr
+                        if (stmt.isAsync && bound is PyCoroutine) bound = bound.awaitResult()
                         if (target != null) assignTarget(target, bound, env, stmt.line)
                     }
                     try {
                         execBlock(stmt.body, env)
                     } finally {
                         for (mgr in managers.asReversed()) {
-                            val exitFn = try { getAttribute(mgr, "__exit__", stmt.line) } catch (_: PyException) { null }
-                            if (exitFn != null) callValue(exitFn, listOf(PyNone, PyNone, PyNone), emptyMap(), stmt.line)
+                            val exitFn = try { getAttribute(mgr, exitAttr, stmt.line) } catch (_: PyException) { null }
+                            if (exitFn != null) {
+                                val r = callValue(exitFn, listOf(PyNone, PyNone, PyNone), emptyMap(), stmt.line)
+                                if (stmt.isAsync && r is PyCoroutine) r.awaitResult()
+                            }
                         }
                     }
                     PyNone
@@ -498,6 +530,10 @@ class PyEvaluator(
                 }
                 PyFunction("<lambda>", expr.params, listOf(Stmt.Return(expr.body, expr.line)), env, defaults = defaults)
             }
+            is Expr.Await -> {
+                val target = evalExpr(expr.value, env)
+                if (target is PyCoroutine) target.awaitResult() else target
+            }
         }
     }
 
@@ -584,6 +620,20 @@ class PyEvaluator(
                         )
                     }
                     fnEnv.defineLocal(param.name, value)
+                }
+            }
+        }
+
+        if (fn.isAsync) {
+            return PyCoroutine(fn.name) {
+                try {
+                    execBlock(fn.body, fnEnv)
+                    PyNone
+                } catch (r: ReturnSignal) {
+                    r.value
+                } catch (e: PyException) {
+                    e.addFrame(activeFileName, callLine, fn.name)
+                    throw e
                 }
             }
         }
@@ -730,6 +780,30 @@ class PyEvaluator(
             } else {
                 val i = normalizeIndex(idx, obj.value.length, line)
                 PyStr(obj.value[i].toString())
+            }
+        }
+        is PyBytes -> {
+            if (idx is PySlice) {
+                val bytesList = obj.data.toList()
+                PyBytes(sliceList(bytesList, idx).toByteArray())
+            } else {
+                val i = normalizeIndex(idx, obj.data.size, line)
+                PyInt(obj.data[i].toInt() and 0xFF)
+            }
+        }
+        is PyMemoryView -> {
+            if (idx is PySlice) {
+                val step = idx.step ?: 1
+                if (step == 1) {
+                    val start = (idx.start?.let { if (it < 0) obj.length + it else it } ?: 0).coerceIn(0, obj.length)
+                    val stop = (idx.stop?.let { if (it < 0) obj.length + it else it } ?: obj.length).coerceIn(0, obj.length)
+                    obj.slice(start, stop)
+                } else {
+                    PyBytes(sliceList(obj.toByteArray().toList(), idx).toByteArray())
+                }
+            } else {
+                val i = normalizeIndex(idx, obj.length, line)
+                PyInt(obj.byteAt(i))
             }
         }
         is PyDict -> obj.get(idx) ?: throw PyException("KeyError", idx.toReprString(), line, activeFileName)
@@ -894,15 +968,18 @@ class PyEvaluator(
             return PySet(LinkedHashSet(onlyL + onlyR))
         }
 
-        // String / List / Tuple concat & repetition
+        // String / Bytes / List / Tuple concat & repetition
         if (op == "+") {
             if (l is PyStr && r is PyStr) return PyStr(l.value + r.value)
+            if (l is PyBytes && r is PyBytes) return PyBytes(l.data + r.data)
             if (l is PyList && r is PyList) return PyList((l.elements + r.elements).toMutableList())
             if (l is PyTuple && r is PyTuple) return PyTuple(l.elements + r.elements)
         }
         if (op == "*") {
             if (l is PyStr && r.asBigInt() != null) return PyStr(l.value.repeat(r.asBigInt()!!.toInt().coerceAtLeast(0)))
             if (r is PyStr && l.asBigInt() != null) return PyStr(r.value.repeat(l.asBigInt()!!.toInt().coerceAtLeast(0)))
+            if (l is PyBytes && r.asBigInt() != null) return PyBytes(repeatBytes(l.data, r.asBigInt()!!.toInt().coerceAtLeast(0)))
+            if (r is PyBytes && l.asBigInt() != null) return PyBytes(repeatBytes(r.data, l.asBigInt()!!.toInt().coerceAtLeast(0)))
             if (l is PyList && r.asBigInt() != null) {
                 val n = r.asBigInt()!!.toInt().coerceAtLeast(0)
                 return PyList(buildList { repeat(n) { addAll(l.elements) } }.toMutableList())
@@ -1027,6 +1104,8 @@ class PyEvaluator(
         is PyTuple -> value.elements
         is PyRange -> value.toList()
         is PyStr -> value.value.map { PyStr(it.toString()) }
+        is PyBytes -> value.data.map { PyInt(it.toInt() and 0xFF) }
+        is PyMemoryView -> value.toByteArray().map { PyInt(it.toInt() and 0xFF) }
         is PyDict -> value.entries.keys.map { it.value }
         is PyFrozenDict -> value.entries.keys.map { it.value }
         is PySet -> value.elements.map { it.value }
@@ -1042,6 +1121,8 @@ class PyEvaluator(
 
     suspend fun pyLen(v: PyValue): Long = when (v) {
         is PyStr -> v.value.length.toLong()
+        is PyBytes -> v.data.size.toLong()
+        is PyMemoryView -> v.length.toLong()
         is PyList -> v.elements.size.toLong()
         is PyTuple -> v.elements.size.toLong()
         is PyDict -> v.entries.size.toLong()
@@ -1054,6 +1135,15 @@ class PyEvaluator(
             callValue(lenFn, listOf(v), emptyMap(), 0).asBigInt()?.toLong() ?: 0L
         }
         else -> throw PyException("TypeError", "object of type '${v.typeName}' has no len()")
+    }
+
+    private fun repeatBytes(data: ByteArray, times: Int): ByteArray {
+        if (times <= 0 || data.isEmpty()) return ByteArray(0)
+        val out = ByteArray(data.size * times)
+        for (i in 0 until times) {
+            System.arraycopy(data, 0, out, i * data.size, data.size)
+        }
+        return out
     }
 
     suspend fun pyToString(v: PyValue): String {
@@ -1188,7 +1278,12 @@ class PyEvaluator(
 
     private fun matchesException(e: PyException, excSpec: PyValue): Boolean = when (excSpec) {
         is PyTuple -> excSpec.elements.any { matchesException(e, it) }
-        is PyClass -> excSpec.name == "BaseException" || excSpec.name == "Exception" || excSpec.name == e.typeName
+        is PyClass -> {
+            if (excSpec.name == "BaseException") true
+            else if (excSpec.name == "Exception") e.typeName != "KeyboardInterrupt" && e.typeName != "SystemExit"
+            else if (excSpec.name == "ImportError" && e.typeName == "ModuleNotFoundError") true
+            else excSpec.name == e.typeName
+        }
         else -> false
     }
 

@@ -20,11 +20,15 @@ object PyBuiltins {
         val exc = PyClass("Exception", listOf(baseExc))
         env.defineLocal("BaseException", baseExc)
         env.defineLocal("Exception", exc)
+        env.defineLocal("KeyboardInterrupt", PyClass("KeyboardInterrupt", listOf(baseExc)))
+        env.defineLocal("SystemExit", PyClass("SystemExit", listOf(baseExc)))
         listOf(
             "ValueError", "TypeError", "NameError", "IndexError", "KeyError",
             "ZeroDivisionError", "AttributeError", "RuntimeError", "StopIteration",
-            "AssertionError", "FileNotFoundError", "ImportError", "ModuleNotFoundError",
-            "SyntaxError", "NotImplementedError", "OverflowError", "OSError", "IOError"
+            "StopAsyncIteration", "AssertionError", "FileNotFoundError", "ImportError",
+            "ModuleNotFoundError", "SyntaxError", "NotImplementedError", "OverflowError",
+            "OSError", "IOError", "TimeoutError", "EOFError", "ConnectionError",
+            "ConnectionResetError", "BrokenPipeError"
         ).forEach { name ->
             env.defineLocal(name, PyClass(name, listOf(exc)))
         }
@@ -137,6 +141,47 @@ object PyBuiltins {
         // bool(x=False)
         env.defineLocal("bool", PyNativeFunction("bool") { _, args, _ ->
             if (args.isEmpty()) PyBool.FALSE else PyBool.of(args[0].toBool())
+        })
+
+        // bytes(source=b'', encoding='utf-8')
+        val bytesConstructor = PyNativeFunction("bytes") { eval, args, _ ->
+            if (args.isEmpty()) return@PyNativeFunction PyBytes(ByteArray(0))
+            when (val first = args[0]) {
+                is PyBytes -> PyBytes(first.data.copyOf())
+                is PyMemoryView -> PyBytes(first.toByteArray())
+                is PyInt -> {
+                    val n = first.value.toInt()
+                    if (n < 0) throw PyException("ValueError", "negative count")
+                    PyBytes(ByteArray(n))
+                }
+                is PyStr -> {
+                    val enc = (args.getOrNull(1) as? PyStr)?.value?.lowercase() ?: "utf-8"
+                    val cs = if (enc == "latin-1" || enc == "latin1") Charsets.ISO_8859_1 else Charsets.UTF_8
+                    PyBytes(first.value.toByteArray(cs))
+                }
+                else -> {
+                    val items = eval.toIterableList(first)
+                    val out = ByteArray(items.size) { idx ->
+                        val v = items[idx].asBigInt()?.toInt()
+                            ?: throw PyException("TypeError", "'${items[idx].typeName}' object cannot be interpreted as an integer")
+                        if (v !in 0..255) throw PyException("ValueError", "bytes must be in range(0, 256)")
+                        v.toByte()
+                    }
+                    PyBytes(out)
+                }
+            }
+        }
+        env.defineLocal("bytes", bytesConstructor)
+        env.defineLocal("bytearray", bytesConstructor)
+
+        // memoryview(obj)
+        env.defineLocal("memoryview", PyNativeFunction("memoryview") { _, args, _ ->
+            requireArgs("memoryview", args, 1)
+            when (val v = args[0]) {
+                is PyBytes -> PyMemoryView(v.data)
+                is PyMemoryView -> v
+                else -> throw PyException("TypeError", "memoryview: a bytes-like object is required, not '${v.typeName}'")
+            }
         })
 
         // list(iterable=())

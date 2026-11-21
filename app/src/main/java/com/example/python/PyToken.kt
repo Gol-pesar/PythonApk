@@ -5,7 +5,7 @@ enum class TokenType {
     NEWLINE, INDENT, DEDENT, EOF,
 
     // Literals & Identifiers
-    IDENTIFIER, INT, FLOAT, STRING, FSTRING,
+    IDENTIFIER, INT, FLOAT, STRING, FSTRING, BYTES,
 
     // Keywords
     FALSE, NONE, TRUE,
