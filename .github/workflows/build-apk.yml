@@ -70,14 +70,25 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
+      - name: Restore cached debug keystore (for consistent APK signatures)
+        uses: actions/cache@v4
+        with:
+          path: ./debug.keystore
+          key: pylaunch-debug-keystore-v1
+
       - name: Prepare debug keystore
         shell: bash
+        env:
+          SECRET_DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
 
           KEYSTORE_PATH="./debug.keystore"
-          if [[ -f "$KEYSTORE_PATH" ]]; then
-            echo "Debug keystore already exists; skipping preparation."
+          if [[ -f "$KEYSTORE_PATH" && -s "$KEYSTORE_PATH" ]]; then
+            echo "Restored existing debug keystore; APK signature remains consistent."
+          elif [[ -n "${SECRET_DEBUG_KEYSTORE_BASE64:-}" ]]; then
+            echo "Decoding DEBUG_KEYSTORE_BASE64 secret for consistent APK signature..."
+            printf '%s' "$SECRET_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
           elif [[ -f "./debug.keystore.base64" ]]; then
             echo "Decoding project debug.keystore.base64 for consistent APK signature..."
             base64 --decode ./debug.keystore.base64 > "$KEYSTORE_PATH"
@@ -142,6 +153,11 @@ jobs:
           if [[ "$EXPECTED_APK" != *.apk ]]; then
             echo "::error::$EXPECTED_APK does not have the .apk extension."
             exit 1
+          fi
+
+          APKSIGNER_BIN="$(find "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}/build-tools" -name apksigner -type f 2>/dev/null | sort | tail -n 1 || true)"
+          if [[ -n "$APKSIGNER_BIN" && -x "$APKSIGNER_BIN" ]]; then
+            "$APKSIGNER_BIN" verify --verbose --print-certs "$EXPECTED_APK"
           fi
 
           APK_SIZE="$(wc -c < "$EXPECTED_APK" | tr -d ' ')"

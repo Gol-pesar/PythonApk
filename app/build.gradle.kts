@@ -17,11 +17,11 @@ android {
     applicationId = "com.aistudio.pylaunch.k7m2vx"
     minSdk = 24
     targetSdk = 36
-    versionCode = 4
-    versionName = "2.0"
+    versionCode = 5
+    versionName = "2.1"
 
     ndk {
-      abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+      abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
     }
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -69,6 +69,13 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
+  packaging {
+    jniLibs {
+      // Compress .so libraries inside the APK and extract cleanly on install (extractNativeLibs=true),
+      // cutting APK size sharply and preventing OEM PackageInstaller/alignment install failures.
+      useLegacyPackaging = true
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
