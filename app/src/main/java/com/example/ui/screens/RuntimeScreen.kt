@@ -58,54 +58,53 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.EditorSettings
-import com.example.python.PyStdLib
 import com.example.ui.PyLaunchUiState
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import kotlin.math.roundToInt
 
-private data class PepHighlight(
-    val pepCode: String,
+private data class RuntimeCapability(
+    val badge: String,
     val titleFa: String,
     val descFa: String,
     val demoSnippet: String
 )
 
-private val Python315Highlights = listOf(
-    PepHighlight(
-        pepCode = "PEP 814",
-        titleFa = "نوع جدید frozendict",
-        descFa = "دیکشنری تغییرناپذیر و قابل هش شدن در هسته پایتون ۳.۱۵.",
-        demoSnippet = "frozendict(engine='Python 3.15.2', mobile='Android')"
+private val NativeRuntimeCapabilities = listOf(
+    RuntimeCapability(
+        badge = "PyPI",
+        titleFa = "بسته رسمی websockets",
+        descFa = "نسخه کامل و رسمی PyPI برای کلاینت و سرور WebSocket (wss:// و ws://) با سرعت نیتیو.",
+        demoSnippet = "import websockets; f'websockets {websockets.__version__}'"
     ),
-    PepHighlight(
-        pepCode = "PEP 810",
-        titleFa = "بارگذاری تنبل (lazy import)",
-        descFa = "به تعویق انداختن بارگذاری ماژول‌ها تا لحظه استفاده برای شروع سریع‌تر.",
-        demoSnippet = "lazy import math; math.sqrt(256)"
+    RuntimeCapability(
+        badge = "Async",
+        titleFa = "هسته واقعی asyncio و سوکت نیتیو",
+        descFa = "اجرای پرسرعت event loop بومی CPython با TCP_NODELAY، TLS/SNI و همزمانی واقعی.",
+        demoSnippet = "import asyncio, socket; asyncio.run(asyncio.sleep(0.01, result='asyncio OK'))"
     ),
-    PepHighlight(
-        pepCode = "PEP 661",
-        titleFa = "اشیاء نگهبان (sentinel)",
-        descFa = "ساخت مقادیر نگهبان یکتا برای تفکیک آرگومان ارسال‌نشده از None.",
-        demoSnippet = "MISSING = sentinel('MISSING'); MISSING"
+    RuntimeCapability(
+        badge = "TLS / SSL",
+        titleFa = "گواهی‌نامه‌های certifi + OpenSSL",
+        descFa = "احراز هویت امن HTTPS و WSS روی همه دستگاه‌های اندروید با بسته certifi به‌روز.",
+        demoSnippet = "import ssl, certifi; (ssl.OPENSSL_VERSION, certifi.where())"
     ),
-    PepHighlight(
-        pepCode = "PEP 798",
-        titleFa = "Unpacking در Comprehension",
-        descFa = "استفاده مستقیم از عملگر * و ** درون لیست و دیکشنری comprehension.",
-        demoSnippet = "[*x for x in [[10, 20], [30, 40]]]"
+    RuntimeCapability(
+        badge = "HTTP",
+        titleFa = "بسته رسمی requests",
+        descFa = "ارسال درخواست‌های HTTP/HTTPS با پشتیبانی کامل از JSON، هدرها و نشست‌ها.",
+        demoSnippet = "import requests; f'requests {requests.__version__}'"
     ),
-    PepHighlight(
-        pepCode = "PEP 686",
-        titleFa = "UTF-8 به‌عنوان کدگذاری پیش‌فرض",
-        descFa = "پشتیبانی کامل و یکپارچه از متون فارسی و یونیکد در فایل‌ها و کنسول.",
-        demoSnippet = "import sys; sys.getdefaultencoding()"
+    RuntimeCapability(
+        badge = "Crypto",
+        titleFa = "رمزنگاری سریع C (hashlib و hmac)",
+        descFa = "توابع SHA-256، HMAC، struct و تولید بایت تصادفی با سرعت بومی زبان C.",
+        demoSnippet = "import hashlib, hmac; hmac.new(b'key', b'OK', hashlib.sha256).hexdigest()[:16]"
     ),
-    PepHighlight(
-        pepCode = "PEP 799",
-        titleFa = "پروفایلینگ داخلی (profiling)",
-        descFa = "ابزار اندازه‌گیری سریع زمان اجرای توابع و الگوریتم‌ها.",
-        demoSnippet = "import profiling; profiling.benchmark(lambda: sum(range(200)), 5)"
+    RuntimeCapability(
+        badge = "Stdlib",
+        titleFa = "کتابخانه استاندارد کامل CPython",
+        descFa = "دسترسی کامل به sqlite3، json، re، pathlib، threading، urllib، zlib و صدها ماژول دیگر.",
+        demoSnippet = "import sqlite3, sys; (sys.implementation.name, sqlite3.sqlite_version)"
     )
 )
 
@@ -122,6 +121,7 @@ fun RuntimeScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val info = uiState.runtimeInfo
 
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         LazyColumn(
@@ -136,7 +136,7 @@ fun RuntimeScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(206.dp)
+                        .height(212.dp)
                         .clip(RoundedCornerShape(20.dp))
                         .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(20.dp))
                 ) {
@@ -169,7 +169,7 @@ fun RuntimeScreen(
                             shape = RoundedCornerShape(50)
                         ) {
                             Text(
-                                text = "Python 3.15.2 • Android Runtime",
+                                text = "${info.implementation} ${info.pythonVersion} • Native Android",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
@@ -191,7 +191,7 @@ fun RuntimeScreen(
                                 onClick = {
                                     val intent = Intent(
                                         Intent.ACTION_VIEW,
-                                        Uri.parse("https://www.python.org/downloads/release/python-3152/")
+                                        Uri.parse("https://pypi.org/project/websockets/")
                                     )
                                     context.startActivity(intent)
                                 },
@@ -246,16 +246,21 @@ fun RuntimeScreen(
                                 style = MaterialTheme.typography.titleMedium
                             )
                         }
-                        SpecRow("نسخه پایتون", "3.15.2 (final)")
-                        SpecRow("کدگذاری پیش‌فرض", "UTF-8 (PEP 686)")
-                        SpecRow("موتور اجرا", "PyLaunch Native-Safe Kotlin Engine")
+                        SpecRow("موتور اجرا", "${info.implementation} ${info.pythonVersion} (Native C)")
+                        SpecRow("بسته websockets", "v${info.websocketsVersion} (PyPI)")
+                        SpecRow("بسته requests", "v${info.requestsVersion} (PyPI)")
+                        SpecRow("موتور TLS / SSL", info.opensslVersion)
+                        SpecRow(
+                            "سرویس پس‌زمینه اندروید",
+                            if (uiState.isBackgroundServiceActive) "فعال (Foreground + WakeLock)" else "آماده (بهینه‌سازی خودکار هنگام اجرا)"
+                        )
                         SpecRow("نسخه اندروید دستگاه", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
                         SpecRow("معماری پردازنده", Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a")
                     }
                 }
             }
 
-            // Python 3.15.2 Features Showcase
+            // Native Capabilities Showcase
             item {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -275,7 +280,7 @@ fun RuntimeScreen(
 
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Python315Highlights.forEach { feat ->
+                    NativeRuntimeCapabilities.forEach { feat ->
                         Card(
                             shape = RoundedCornerShape(14.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -302,7 +307,7 @@ fun RuntimeScreen(
                                         color = MaterialTheme.colorScheme.primaryContainer
                                     ) {
                                         Text(
-                                            text = feat.pepCode,
+                                            text = feat.badge,
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
@@ -320,7 +325,7 @@ fun RuntimeScreen(
                                 ) {
                                     TextButton(
                                         onClick = { onTryInRepl(feat.demoSnippet) },
-                                        modifier = Modifier.testTag("try_pep_${feat.pepCode.replace(" ", "_")}")
+                                        modifier = Modifier.testTag("try_cap_${feat.badge.replace(" ", "_")}")
                                     ) {
                                         Icon(
                                             imageVector = Icons.Default.PlayArrow,
@@ -337,7 +342,7 @@ fun RuntimeScreen(
                 }
             }
 
-            // Bundled Stdlib Modules
+            // Installed PyPI Packages Card
             item {
                 Card(
                     shape = RoundedCornerShape(16.dp),
@@ -365,19 +370,27 @@ fun RuntimeScreen(
                             )
                         }
 
+                        val displayPackages = if (info.packages.isNotEmpty()) {
+                            info.packages
+                        } else {
+                            listOf("websockets", "requests", "certifi", "urllib3", "idna", "charset-normalizer")
+                        }
+
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            PyStdLib.availableModules.forEach { modName ->
+                            displayPackages.forEach { pkgSpec ->
+                                val pkgImport = pkgSpec.substringBefore("==").replace("-", "_")
                                 Surface(
-                                    onClick = { onTryInRepl("import $modName; dir($modName)") },
+                                    onClick = { onTryInRepl("import $pkgImport; dir($pkgImport)[:12]") },
                                     shape = RoundedCornerShape(10.dp),
                                     color = MaterialTheme.colorScheme.surfaceVariant
                                 ) {
                                     Text(
-                                        text = modName,
+                                        text = pkgSpec,
                                         style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = JetBrainsMonoFontFamily,
                                         color = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                                     )

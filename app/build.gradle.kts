@@ -6,6 +6,7 @@ plugins {
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.secrets)
   alias(libs.plugins.google.services)
+  id("com.chaquo.python")
 }
 
 android {
@@ -16,8 +17,12 @@ android {
     applicationId = "com.aistudio.pylaunch.k7m2vx"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "1.2"
+    versionCode = 4
+    versionName = "2.0"
+
+    ndk {
+      abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+    }
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -67,6 +72,17 @@ android {
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
+  }
+}
+
+chaquopy {
+  defaultConfig {
+    version = "3.11"
+    pip {
+      install("websockets")
+      install("requests")
+      install("certifi")
+    }
   }
 }
 

@@ -25,39 +25,64 @@ class WorkspaceRepository(context: Context) {
 
     val templates: List<PythonTemplate> = listOf(
         PythonTemplate(
-            id = "python_315_tour",
-            fileName = "hello_315.py",
-            titleFa = "معرفی Python 3.15.2",
-            subtitleFa = "تست frozendict، lazy import، sentinel و unpacking در comprehension",
-            badge = "3.15.2",
+            id = "cpython_native_check",
+            fileName = "hello_cpython.py",
+            titleFa = "تست موتور واقعی CPython و websockets",
+            subtitleFa = "بررسی نسخه CPython، کتابخانه رسمی websockets، OpenSSL و سرعت اجرا",
+            badge = "Native C",
             code = """
-# خوش آمدید به راه‌انداز Python 3.15.2 برای اندروید!
+# خوش آمدید به موتور واقعی CPython روی اندروید!
 import sys
-lazy import math  # PEP 810: بارگذاری تنبل تا لحظه استفاده
+import ssl
+import time
+import websockets
+import requests
+import certifi
 
-print("نسخه موتور:", sys.version)
-print("کدگذاری پیش‌فرض (PEP 686):", sys.getdefaultencoding())
+print("نسخه CPython:", sys.version.split()[0])
+print("پلتفرم:", sys.platform, "| کدگذاری:", sys.getdefaultencoding())
+print("نسخه websockets (PyPI):", websockets.__version__)
+print("نسخه requests (PyPI):", requests.__version__)
+print("نسخه OpenSSL:", ssl.OPENSSL_VERSION)
+print("مسیر گواهی certifi:", certifi.where())
 
-# 1) PEP 814: دیکشنری تغییرناپذیر frozendict
-config = frozendict(runtime="Python 3.15.2", platform="Android", utf8=True)
-print("تنظیمات ثابت:", config)
+# بنچمارک سریع رمزنگاری XOR روی ۴ مگابایت داده
+t0 = time.perf_counter()
+data = bytes(range(256)) * 16384  # 4 MB
+key = b"PyLaunchAndroid!" * (len(data) // 16)
+enc = (int.from_bytes(data, sys.byteorder) ^ int.from_bytes(key, sys.byteorder)).to_bytes(len(data), sys.byteorder)
+dt = (time.perf_counter() - t0) * 1000
+print(f"سرعت XOR روی ۴ مگابایت داده نیتیو: {dt:.1f} میلی‌ثانیه (طول: {len(enc):,} بایت)")
+""".trimIndent()
+        ),
+        PythonTemplate(
+            id = "websockets_loopback",
+            fileName = "ws_echo_test.py",
+            titleFa = "تست کامل سرور و کلاینت WebSocket",
+            subtitleFa = "اجرای واقعی asyncio + websockets روی لوکال‌هاست اندروید",
+            badge = "WebSocket",
+            code = """
+import asyncio
+import websockets
 
-# 2) PEP 661: شیء نگهبان sentinel
-MISSING = sentinel("MISSING")
-def get_setting(key, default=MISSING):
-    val = config.get(key, default)
-    return "یافت نشد" if val is MISSING else val
+async def echo_handler(ws):
+    async for msg in ws:
+        await ws.send(f"پاسخ سرور: {msg}")
 
-print("مقدار platform:", get_setting("platform"))
-print("مقدار theme:", get_setting("theme"))
+async def main():
+    async with websockets.serve(echo_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        print(f"سرور WebSocket روی 127.0.0.1:{port} آماده شد.")
 
-# 3) PEP 798: باز کردن (Unpacking) مستقیم درون Comprehension
-matrix = [[1, 2], [3, 4], [5, 6]]
-flat = [*row for row in matrix]
-print("ماتریس تخت‌شده:", flat)
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as client:
+            for i in range(1, 4):
+                await client.send(f"پیام شماره {i}")
+                reply = await client.recv()
+                print("دریافت شد ->", reply)
 
-# فراخوانی ماژول lazy import شده
-print(f"ریشه دوم 144 = {math.sqrt(144):.1f} | عدد پی = {math.pi:.4f}")
+        print("تست بسته رسمی websockets با موفقیت کامل شد!")
+
+asyncio.run(main())
 """.trimIndent()
         ),
         PythonTemplate(
@@ -69,7 +94,7 @@ print(f"ریشه دوم 144 = {math.sqrt(144):.1f} | عدد پی = {math.pi:.4f}
             code = """
 # مثال دریافت ورودی تعاملی و استفاده از match / case
 name = input("نام شما چیست؟ ")
-print(f"سلام {name}! به کنسول Python 3.15.2 خوش آمدی.")
+print(f"سلام {name}! به کنسول نیتیو پایتون خوش آمدی.")
 
 op = input("عملیات را انتخاب کنید (+, -, *, /): ").strip()
 a = float(input("عدد اول: "))
@@ -132,20 +157,20 @@ import os
 from datetime import datetime
 
 data = {
-    "app": "PyLaunch 3.15",
+    "app": "PyLaunch",
     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     "scores": [98, 92, 100, 87],
     "note": "ذخیره‌سازی امن با کدگذاری UTF-8"
 }
 
-with open("notes_data.json", "w") as f:
-    json.dump(data, f, indent=2)
+with open("notes_data.json", "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
 
-with open("notes_data.json", "r") as f:
+with open("notes_data.json", "r", encoding="utf-8") as f:
     loaded = json.load(f)
 
 print("داده خوانده‌شده از فایل:")
-print(json.dumps(loaded, indent=2))
+print(json.dumps(loaded, indent=2, ensure_ascii=False))
 print("فایل‌های موجود در پوشه پروژه:", os.listdir())
 """.trimIndent()
         ),
@@ -156,6 +181,8 @@ print("فایل‌های موجود در پوشه پروژه:", os.listdir())
             subtitleFa = "کلاس، وراثت، property و متدهای جادویی",
             badge = "شیءگرا",
             code = """
+import math
+
 class Shape:
     def __init__(self, name):
         self.name = name
@@ -168,7 +195,7 @@ class Shape:
 
 class Circle(Shape):
     def __init__(self, radius):
-        Shape.__init__(self, "دایره")
+        super().__init__("دایره")
         self._r = radius
 
     @property
@@ -176,12 +203,11 @@ class Circle(Shape):
         return self._r
 
     def area(self):
-        import math
         return math.pi * (self._r ** 2)
 
 class Rectangle(Shape):
     def __init__(self, w, h):
-        Shape.__init__(self, "مستطیل")
+        super().__init__("مستطیل")
         self.w = w
         self.h = h
 
@@ -191,28 +217,6 @@ class Rectangle(Shape):
 shapes = [Circle(5), Rectangle(4, 7), Circle(2.5)]
 for s in shapes:
     print(s)
-""".trimIndent()
-        ),
-        PythonTemplate(
-            id = "profiler_315",
-            fileName = "profiler_315.py",
-            titleFa = "پروفایلینگ Python 3.15",
-            subtitleFa = "سنجش سرعت اجرا با profiling و statistics",
-            badge = "PEP 799",
-            code = """
-import profiling
-import statistics
-
-def compute_squares():
-    return sum(i * i for i in range(500))
-
-report = profiling.benchmark(compute_squares, iterations=15)
-print("گزارش پروفایلر Python 3.15:")
-for k, v in report.items():
-    print(f"  {k}: {v}")
-
-samples = [14.2, 15.8, 13.9, 16.4, 15.1, 14.7]
-print(f"میانگین: {statistics.mean(samples):.2f} | میانه: {statistics.median(samples):.2f}")
 """.trimIndent()
         )
     )

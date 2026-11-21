@@ -19,9 +19,9 @@
     <string name="action_open">باز کردن</string>
     <string name="action_send">ارسال</string>
     <string name="action_reset_repl">بازنشانی محیط</string>
-    <string name="action_open_release_page">صفحه رسمی Python 3.15.2</string>
+    <string name="action_open_release_page">مستندات websockets در PyPI</string>
 
-    <string name="editor_placeholder"># کد پایتون ۳.۱۵.۲ خود را اینجا بنویسید…</string>
+    <string name="editor_placeholder"># کد پایتون خود را اینجا بنویسید (CPython نیتیو + websockets)…</string>
     <string name="output_title">خروجی اجرا</string>
     <string name="output_empty">برای مشاهده خروجی، دکمه اجرا را بزنید.</string>
     <string name="output_waiting_input">برنامه منتظر ورودی شما است…</string>
@@ -33,32 +33,37 @@
     <string name="status_saved">ذخیره شد</string>
     <string name="status_unsaved">تغییرات ذخیره نشده</string>
 
-    <string name="repl_title">کنسول تعاملی Python 3.15.2</string>
-    <string name="repl_placeholder">دستور پایتون را وارد کنید (مثلاً: frozendict(a=1))</string>
+    <string name="repl_title">کنسول تعاملی CPython نیتیو</string>
+    <string name="repl_placeholder">دستور پایتون را وارد کنید (مثلاً: import websockets; websockets.__version__)</string>
     <string name="repl_history_prev">دستور قبلی</string>
     <string name="repl_history_next">دستور بعدی</string>
 
     <string name="files_section_workspace">فایل‌های پروژه شما</string>
-    <string name="files_section_templates">نمونه‌های آماده Python 3.15.2</string>
+    <string name="files_section_templates">نمونه‌های آماده CPython و WebSocket</string>
     <string name="files_empty_title">هنوز فایلی نساخته‌اید</string>
-    <string name="files_empty_subtitle">یک فایل پایتون جدید بسازید یا یکی از نمونه‌های آماده ۳.۱۵.۲ را اجرا کنید.</string>
+    <string name="files_empty_subtitle">یک فایل پایتون جدید بسازید یا یکی از نمونه‌های آماده را اجرا کنید.</string>
     <string name="dialog_new_file_title">ایجاد فایل پایتون جدید</string>
     <string name="dialog_file_name_label">نام فایل (مثلاً script.py)</string>
     <string name="dialog_delete_title">حذف فایل</string>
     <string name="dialog_delete_message">آیا از حذف این فایل مطمئن هستید؟</string>
 
-    <string name="runtime_hero_title">راه‌انداز Python 3.15.2 برای اندروید</string>
-    <string name="runtime_hero_subtitle">اجرای آفلاین کدهای پایتون با پشتیبانی از قابلیت‌های نسخه ۳.۱۵.۲ و کدگذاری پیش‌فرض UTF-8</string>
+    <string name="runtime_hero_title">موتور نیتیو CPython برای اندروید</string>
+    <string name="runtime_hero_subtitle">اجرای واقعی CPython با بسته رسمی websockets، requests، certifi و سرویس پس‌زمینه ضدتوقف</string>
     <string name="runtime_specs_title">مشخصات موتور اجرا</string>
-    <string name="runtime_features_title">قابلیت‌های ویژه Python 3.15.2</string>
-    <string name="runtime_modules_title">ماژول‌های استاندارد فعال</string>
+    <string name="runtime_features_title">قابلیت‌های موتور نیتیو و PyPI</string>
+    <string name="runtime_modules_title">بسته‌های PyPI نصب‌شده (pip)</string>
     <string name="runtime_settings_title">تنظیمات ویرایشگر و نمایش</string>
     <string name="setting_dark_theme">پوسته تاریک توسعه‌دهنده</string>
     <string name="setting_font_size">اندازه فونت کد</string>
     <string name="setting_tab_size">اندازه تورفتگی (Tab)</string>
     <string name="setting_word_wrap">شکستن خودکار خطوط</string>
-    <string name="cd_hero_banner">بنر محیط اجرای پایتون ۳.۱۵.۲</string>
+    <string name="cd_hero_banner">بنر محیط اجرای نیتیو پایتون</string>
     <string name="cd_toggle_console">باز و بسته کردن پنل خروجی</string>
     <string name="cd_run_code">اجرای اسکریپت پایتون</string>
     <string name="cd_stop_code">توقف اجرای اسکریپت</string>
+
+    <string name="notification_channel_name">اجرای پایتون در پس‌زمینه</string>
+    <string name="notification_channel_desc">اسکریپت‌های پایتون و سرورهای محلی را هنگام خروج از برنامه فعال نگه می‌دارد</string>
+    <string name="notification_running_title">پایتون در حال اجرا (CPython)</string>
+    <string name="notification_running_text">اسکریپت %1$s در پس‌زمینه فعال است</string>
 </resources>

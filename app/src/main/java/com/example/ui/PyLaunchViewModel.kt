@@ -8,13 +8,12 @@ import com.example.data.PythonTemplate
 import com.example.data.SettingsRepository
 import com.example.data.WorkspaceFile
 import com.example.data.WorkspaceRepository
-import com.example.python.PyEvaluator
-import com.example.python.PyException
-import com.example.python.PyExecutionCancelled
-import com.example.python.PyNone
+import com.example.python.CPythonBridge
+import com.example.python.CPythonCallback
+import com.example.python.NativeRuntimeInfo
+import com.example.runtime.RuntimeServiceController
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -22,7 +21,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runBlocking
+import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 
 enum class MainTab {
     EDITOR, CONSOLE, FILES, RUNTIME
@@ -57,7 +59,9 @@ data class PyLaunchUiState(
     val replEntries: List<ConsoleEntry> = emptyList(),
     val replHistory: List<String> = emptyList(),
     val replWaitingPrompt: String? = null,
-    val workspacePath: String = ""
+    val workspacePath: String = "",
+    val runtimeInfo: NativeRuntimeInfo = NativeRuntimeInfo(),
+    val isBackgroundServiceActive: Boolean = false
 )
 
 class PyLaunchViewModel(application: Application) : AndroidViewModel(application) {
@@ -75,12 +79,24 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
     val uiState: StateFlow<PyLaunchUiState> = _uiState.asStateFlow()
 
     private var entryIdCounter = 1L
-    private var scriptJob: Job? = null
-    private var activeScriptEvaluator: PyEvaluator? = null
-    private var pendingScriptInput: CompletableDeferred<String>? = null
-    private var pendingReplInput: CompletableDeferred<String>? = null
+    private val scriptExecutor = Executors.newCachedThreadPool { r ->
+        Thread(r, "cpython-script-worker").apply { isDaemon = true }
+    }
+    private val replExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "cpython-repl-worker").apply { isDaemon = true }
+    }
 
-    private var replEvaluator: PyEvaluator = createReplEvaluator()
+    @Volatile
+    private var activeRunId: String? = null
+
+    @Volatile
+    private var activeScriptFuture: Future<*>? = null
+
+    @Volatile
+    private var pendingScriptInput: CompletableDeferred<String>? = null
+
+    @Volatile
+    private var pendingReplInput: CompletableDeferred<String>? = null
 
     init {
         val files = workspaceRepo.listFiles()
@@ -95,39 +111,53 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
                 workspaceFiles = files,
                 templates = workspaceRepo.templates,
                 workspacePath = workspaceRepo.workspaceDir.absolutePath,
-                replEntries = initialReplBanner()
+                replEntries = initialReplBanner(NativeRuntimeInfo())
             )
+        }
+
+        RuntimeServiceController.onStopRequested = {
+            stopActiveScript()
+        }
+
+        viewModelScope.launch {
+            RuntimeServiceController.isServiceActive.collect { active ->
+                _uiState.update { it.copy(isBackgroundServiceActive = active) }
+            }
+        }
+
+        // Warm up native CPython runtime and load live package/version metadata off the main thread.
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val info = CPythonBridge.getRuntimeInfo(getApplication())
+                _uiState.update { state ->
+                    val updatedRepl = if (state.replEntries.size == 1 && state.replEntries.first().kind == ConsoleEntryKind.SYSTEM) {
+                        initialReplBanner(info)
+                    } else {
+                        state.replEntries
+                    }
+                    state.copy(runtimeInfo = info, replEntries = updatedRepl)
+                }
+            } catch (_: Throwable) {
+            }
         }
     }
 
+    @Synchronized
     private fun nextId(): Long = entryIdCounter++
 
-    private fun initialReplBanner(): List<ConsoleEntry> = listOf(
-        ConsoleEntry(
-            id = nextId(),
-            text = "Python 3.15.2 (PyLaunch Android Runtime, UTF-8 Default) on android\n" +
-                "Supports PEP 814 frozendict, PEP 810 lazy import, PEP 661 sentinel & PEP 798 unpacking.\n" +
-                "Type any Python expression or statement below.",
-            kind = ConsoleEntryKind.SYSTEM
+    private fun initialReplBanner(info: NativeRuntimeInfo): List<ConsoleEntry> {
+        val ver = info.pythonVersion
+        val ws = info.websocketsVersion
+        return listOf(
+            ConsoleEntry(
+                id = nextId(),
+                text = "CPython $ver (Native Android Runtime via Chaquopy) • UTF-8\n" +
+                    "PyPI packages ready: websockets ($ws), requests, certifi, asyncio, ssl, sqlite3\n" +
+                    "Type any Python expression or statement below.",
+                kind = ConsoleEntryKind.SYSTEM
+            )
         )
-    )
-
-    private fun createReplEvaluator(): PyEvaluator = PyEvaluator(
-        workspaceDir = workspaceRepo.workspaceDir,
-        onStdout = { chunk ->
-            appendReplEntry(chunk, ConsoleEntryKind.STDOUT)
-        },
-        onInput = { prompt ->
-            val deferred = CompletableDeferred<String>()
-            pendingReplInput = deferred
-            _uiState.update { it.copy(replWaitingPrompt = prompt.ifEmpty { "ورودی:" }) }
-            val result = deferred.await()
-            pendingReplInput = null
-            _uiState.update { it.copy(replWaitingPrompt = null) }
-            appendReplEntry(result, ConsoleEntryKind.INPUT_ECHO)
-            result
-        }
-    )
+    }
 
     fun selectTab(tab: MainTab) {
         _uiState.update { it.copy(selectedTab = tab) }
@@ -172,7 +202,11 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
         saveActiveFile()
         val fileName = _uiState.value.activeFileName
         val code = _uiState.value.editorCode
+        val workspacePath = workspaceRepo.workspaceDir.absolutePath
+        val runId = UUID.randomUUID().toString()
+        activeRunId = runId
 
+        val pyVer = _uiState.value.runtimeInfo.pythonVersion
         _uiState.update {
             it.copy(
                 runStatus = RunStatus.RUNNING,
@@ -182,86 +216,135 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
                 outputEntries = listOf(
                     ConsoleEntry(
                         id = nextId(),
-                        text = "$ python3.15 $fileName",
+                        text = "$ python$pyVer $fileName",
                         kind = ConsoleEntryKind.SYSTEM
                     )
                 )
             )
         }
 
+        val appContext = getApplication<Application>().applicationContext
+        RuntimeServiceController.start(appContext, fileName)
+
         val startTime = System.currentTimeMillis()
-        scriptJob = viewModelScope.launch {
-            val evaluator = PyEvaluator(
-                workspaceDir = workspaceRepo.workspaceDir,
-                onStdout = { chunk ->
-                    appendOutputEntry(chunk, ConsoleEntryKind.STDOUT)
-                },
-                onInput = { prompt ->
+        activeScriptFuture = scriptExecutor.submit {
+            val callback = object : CPythonCallback {
+                override fun onOutput(text: String, isError: Boolean) {
+                    if (activeRunId != runId) return
+                    appendOutputEntry(
+                        text = text,
+                        kind = if (isError) ConsoleEntryKind.STDERR else ConsoleEntryKind.STDOUT
+                    )
+                }
+
+                override fun onInput(prompt: String): String? {
+                    if (activeRunId != runId) return null
                     val deferred = CompletableDeferred<String>()
                     pendingScriptInput = deferred
                     _uiState.update { it.copy(waitingForInputPrompt = prompt.ifEmpty { "ورودی:" }) }
-                    val ans = deferred.await()
-                    pendingScriptInput = null
-                    _uiState.update { it.copy(waitingForInputPrompt = null) }
-                    appendOutputEntry("$ans\n", ConsoleEntryKind.INPUT_ECHO)
-                    ans
+                    return try {
+                        val ans = runBlocking { deferred.await() }
+                        pendingScriptInput = null
+                        _uiState.update { it.copy(waitingForInputPrompt = null) }
+                        appendOutputEntry("$ans\n", ConsoleEntryKind.INPUT_ECHO)
+                        ans
+                    } catch (_: Throwable) {
+                        pendingScriptInput = null
+                        _uiState.update { it.copy(waitingForInputPrompt = null) }
+                        null
+                    }
                 }
-            )
+            }
 
-            activeScriptEvaluator = evaluator
             try {
-                withContext(Dispatchers.Default) {
-                    evaluator.executeScript(code, fileName)
-                }
+                val result = CPythonBridge.runScript(
+                    context = appContext,
+                    runId = runId,
+                    code = code,
+                    filename = fileName,
+                    workspaceDir = workspacePath,
+                    callback = callback
+                )
                 val duration = System.currentTimeMillis() - startTime
-                _uiState.update {
-                    it.copy(
-                        runStatus = RunStatus.SUCCESS,
-                        lastRunDurationMs = duration,
-                        workspaceFiles = workspaceRepo.listFiles()
-                    )
+                if (activeRunId == runId) {
+                    when (result.status) {
+                        "ok" -> {
+                            _uiState.update {
+                                it.copy(
+                                    runStatus = RunStatus.SUCCESS,
+                                    lastRunDurationMs = duration,
+                                    waitingForInputPrompt = null,
+                                    workspaceFiles = workspaceRepo.listFiles()
+                                )
+                            }
+                        }
+
+                        "stopped" -> {
+                            appendOutputEntry(
+                                "\nKeyboardInterrupt: اجرا توسط کاربر متوقف شد.\n",
+                                ConsoleEntryKind.STDERR
+                            )
+                            _uiState.update {
+                                it.copy(
+                                    runStatus = RunStatus.STOPPED,
+                                    lastRunDurationMs = duration,
+                                    waitingForInputPrompt = null
+                                )
+                            }
+                        }
+
+                        else -> {
+                            if (!result.error.isNullOrBlank()) {
+                                appendOutputEntry("\n${result.error}\n", ConsoleEntryKind.STDERR)
+                            }
+                            _uiState.update {
+                                it.copy(
+                                    runStatus = RunStatus.ERROR,
+                                    lastRunDurationMs = duration,
+                                    waitingForInputPrompt = null
+                                )
+                            }
+                        }
+                    }
                 }
-            } catch (_: PyExecutionCancelled) {
+            } catch (t: Throwable) {
                 val duration = System.currentTimeMillis() - startTime
-                appendOutputEntry("\nKeyboardInterrupt: اجرا توسط کاربر متوقف شد.\n", ConsoleEntryKind.STDERR)
-                _uiState.update {
-                    it.copy(
-                        runStatus = RunStatus.STOPPED,
-                        lastRunDurationMs = duration,
-                        waitingForInputPrompt = null
+                if (activeRunId == runId) {
+                    appendOutputEntry(
+                        "\nRuntimeError: ${t.message ?: "خطای ناشناخته در موتور CPython"}\n",
+                        ConsoleEntryKind.STDERR
                     )
+                    _uiState.update {
+                        it.copy(
+                            runStatus = RunStatus.ERROR,
+                            lastRunDurationMs = duration,
+                            waitingForInputPrompt = null
+                        )
+                    }
                 }
-            } catch (e: PyException) {
-                val duration = System.currentTimeMillis() - startTime
-                appendOutputEntry("\n${e.formatTraceback()}\n", ConsoleEntryKind.STDERR)
-                _uiState.update {
-                    it.copy(
-                        runStatus = RunStatus.ERROR,
-                        lastRunDurationMs = duration,
-                        waitingForInputPrompt = null
-                    )
-                }
-            } catch (e: Exception) {
-                val duration = System.currentTimeMillis() - startTime
-                appendOutputEntry("\nRuntimeError: ${e.message ?: "خطای ناشناخته"}\n", ConsoleEntryKind.STDERR)
-                _uiState.update {
-                    it.copy(
-                        runStatus = RunStatus.ERROR,
-                        lastRunDurationMs = duration,
-                        waitingForInputPrompt = null
-                    )
+            } finally {
+                if (activeRunId == runId) {
+                    activeRunId = null
+                    activeScriptFuture = null
+                    RuntimeServiceController.stop(appContext)
                 }
             }
         }
     }
 
     fun stopActiveScript() {
+        val runIdToStop = activeRunId
         pendingScriptInput?.cancel()
         pendingScriptInput = null
-        activeScriptEvaluator?.closeAllResources()
-        activeScriptEvaluator = null
-        scriptJob?.cancel()
-        scriptJob = null
+
+        val appContext = getApplication<Application>().applicationContext
+        if (runIdToStop != null) {
+            // Ask CPython to cleanly cancel asyncio event loops (releasing listening sockets) and interrupt thread.
+            scriptExecutor.execute {
+                CPythonBridge.stopScript(appContext, runIdToStop)
+            }
+        }
+        RuntimeServiceController.stop(appContext)
         if (_uiState.value.runStatus == RunStatus.RUNNING) {
             _uiState.update {
                 it.copy(
@@ -286,22 +369,52 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
             state.copy(replHistory = updatedHistory)
         }
 
-        viewModelScope.launch {
-            try {
-                val result = withContext(Dispatchers.Default) {
-                    replEvaluator.executeRepl(cmd)
+        val appContext = getApplication<Application>().applicationContext
+        val workspacePath = workspaceRepo.workspaceDir.absolutePath
+
+        replExecutor.execute {
+            val callback = object : CPythonCallback {
+                override fun onOutput(text: String, isError: Boolean) {
+                    appendReplEntry(
+                        text = text.trimEnd('\n'),
+                        kind = if (isError) ConsoleEntryKind.STDERR else ConsoleEntryKind.STDOUT
+                    )
                 }
-                if (result != null && result !is PyNone) {
-                    val repr = withContext(Dispatchers.Default) {
-                        replEvaluator.pyToRepr(result)
+
+                override fun onInput(prompt: String): String? {
+                    val deferred = CompletableDeferred<String>()
+                    pendingReplInput = deferred
+                    _uiState.update { it.copy(replWaitingPrompt = prompt.ifEmpty { "ورودی:" }) }
+                    return try {
+                        val ans = runBlocking { deferred.await() }
+                        pendingReplInput = null
+                        _uiState.update { it.copy(replWaitingPrompt = null) }
+                        appendReplEntry(ans, ConsoleEntryKind.INPUT_ECHO)
+                        ans
+                    } catch (_: Throwable) {
+                        pendingReplInput = null
+                        _uiState.update { it.copy(replWaitingPrompt = null) }
+                        null
                     }
-                    appendReplEntry(repr, ConsoleEntryKind.RESULT)
+                }
+            }
+
+            try {
+                val res = CPythonBridge.execRepl(
+                    context = appContext,
+                    code = cmd,
+                    workspaceDir = workspacePath,
+                    callback = callback
+                )
+                if (!res.resultRepr.isNullOrEmpty()) {
+                    appendReplEntry(res.resultRepr, ConsoleEntryKind.RESULT)
+                }
+                if (!res.error.isNullOrBlank()) {
+                    appendReplEntry(res.error.trimEnd(), ConsoleEntryKind.STDERR)
                 }
                 _uiState.update { it.copy(workspaceFiles = workspaceRepo.listFiles()) }
-            } catch (e: PyException) {
-                appendReplEntry(e.formatTraceback(), ConsoleEntryKind.STDERR)
-            } catch (e: Exception) {
-                appendReplEntry("RuntimeError: ${e.message ?: "خطا"}", ConsoleEntryKind.STDERR)
+            } catch (t: Throwable) {
+                appendReplEntry("RuntimeError: ${t.message ?: "خطا"}", ConsoleEntryKind.STDERR)
             }
         }
     }
@@ -311,18 +424,21 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun clearReplConsole() {
-        _uiState.update { it.copy(replEntries = initialReplBanner()) }
+        _uiState.update { it.copy(replEntries = initialReplBanner(it.runtimeInfo)) }
     }
 
     fun resetReplSession() {
         pendingReplInput?.cancel()
         pendingReplInput = null
-        replEvaluator = createReplEvaluator()
+        val appContext = getApplication<Application>().applicationContext
+        replExecutor.execute {
+            CPythonBridge.resetRepl(appContext)
+        }
         _uiState.update {
             it.copy(
-                replEntries = initialReplBanner() + ConsoleEntry(
+                replEntries = initialReplBanner(it.runtimeInfo) + ConsoleEntry(
                     id = nextId(),
-                    text = "محیط متغیرهای کنسول بازنشانی شد.",
+                    text = "محیط متغیرهای کنسول CPython بازنشانی شد.",
                     kind = ConsoleEntryKind.SYSTEM
                 ),
                 replWaitingPrompt = null
@@ -347,7 +463,7 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
 
     fun createNewFile(rawName: String) {
         val cleanName = workspaceRepo.sanitizeName(rawName)
-        val initialText = "# $cleanName — Python 3.15.2\nprint(\"سلام از $cleanName!\")\n"
+        val initialText = "# $cleanName — Native CPython on Android\nprint(\"سلام از $cleanName!\")\n"
         workspaceRepo.writeFile(cleanName, initialText)
         _uiState.update {
             it.copy(
@@ -444,5 +560,13 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { state ->
             state.copy(replEntries = (state.replEntries + ConsoleEntry(nextId(), text, kind)).takeLast(200))
         }
+    }
+
+    override fun onCleared() {
+        stopActiveScript()
+        RuntimeServiceController.onStopRequested = null
+        scriptExecutor.shutdownNow()
+        replExecutor.shutdownNow()
+        super.onCleared()
     }
 }
