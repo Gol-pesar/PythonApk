@@ -46,7 +46,9 @@ class PythonSyntaxTransformation(
         return transformed
     }
 
-    fun highlight(source: String): AnnotatedString = buildAnnotatedString {
+    fun highlight(source: String): AnnotatedString {
+        if (source.length > 120_000) return AnnotatedString(source)
+        return buildAnnotatedString {
         append(source)
         val len = source.length
         var i = 0
@@ -138,5 +140,6 @@ class PythonSyntaxTransformation(
                 }
             }
         }
+    }
     }
 }

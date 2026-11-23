@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -62,6 +63,7 @@ object RuntimeServiceController {
 class PythonRuntimeService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -90,7 +92,7 @@ class PythonRuntimeService : Service() {
                     0
                 }
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
-                acquireWakeLock()
+                acquirePerformanceLocks()
                 RuntimeServiceController.markActive(true)
             }
         }
@@ -103,7 +105,8 @@ class PythonRuntimeService : Service() {
         super.onDestroy()
     }
 
-    private fun acquireWakeLock() {
+    @Suppress("DEPRECATION")
+    private fun acquirePerformanceLocks() {
         try {
             if (wakeLock == null) {
                 val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -120,6 +123,25 @@ class PythonRuntimeService : Service() {
             }
         } catch (_: Exception) {
         }
+
+        // Prevent Android Wi-Fi power-saving latency spikes during WebSocket/SOCKS5 traffic.
+        try {
+            if (wifiLock == null) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm?.createWifiLock(lockMode, "PyLaunch::LowLatencyWifi")?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wifiLock?.isHeld == false) {
+                wifiLock?.acquire()
+            }
+        } catch (_: Exception) {
+        }
     }
 
     private fun releaseLocks() {
@@ -130,6 +152,15 @@ class PythonRuntimeService : Service() {
         } catch (_: Exception) {
         } finally {
             wakeLock = null
+        }
+
+        try {
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+            }
+        } catch (_: Exception) {
+        } finally {
+            wifiLock = null
         }
     }
 

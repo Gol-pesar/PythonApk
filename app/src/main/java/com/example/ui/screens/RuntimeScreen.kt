@@ -1,8 +1,11 @@
 package com.example.ui.screens
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -71,40 +74,40 @@ private data class RuntimeCapability(
 
 private val NativeRuntimeCapabilities = listOf(
     RuntimeCapability(
-        badge = "PyPI",
-        titleFa = "بسته رسمی websockets",
-        descFa = "نسخه کامل و رسمی PyPI برای کلاینت و سرور WebSocket (wss:// و ws://) با سرعت نیتیو.",
+        badge = "WebSocket",
+        titleFa = "بسته رسمی websockets (بهینه‌شده)",
+        descFa = "نسخه رسمی PyPI با کش دائمی TLS (حذف لگ اتصال‌های همزمان) و اصلاح هدر Host برای Clean IP.",
         demoSnippet = "import websockets; f'websockets {websockets.__version__}'"
     ),
     RuntimeCapability(
-        badge = "Async",
-        titleFa = "هسته واقعی asyncio و سوکت نیتیو",
-        descFa = "اجرای پرسرعت event loop بومی CPython با TCP_NODELAY، TLS/SNI و همزمانی واقعی.",
-        demoSnippet = "import asyncio, socket; asyncio.run(asyncio.sleep(0.01, result='asyncio OK'))"
+        badge = "Async C",
+        titleFa = "بسته‌های aiohttp و httpx + asyncio نیتیو",
+        descFa = "پارسر بومی C (llhttp/yarl/multidict) و event loop بومی CPython با اولویت هسته سریع CPU.",
+        demoSnippet = "import aiohttp, httpx; (aiohttp.__version__, httpx.__version__)"
     ),
     RuntimeCapability(
-        badge = "TLS / SSL",
-        titleFa = "گواهی‌نامه‌های certifi + OpenSSL",
-        descFa = "احراز هویت امن HTTPS و WSS روی همه دستگاه‌های اندروید با بسته certifi به‌روز.",
-        demoSnippet = "import ssl, certifi; (ssl.OPENSSL_VERSION, certifi.where())"
-    ),
-    RuntimeCapability(
-        badge = "HTTP",
-        titleFa = "بسته رسمی requests",
-        descFa = "ارسال درخواست‌های HTTP/HTTPS با پشتیبانی کامل از JSON، هدرها و نشست‌ها.",
-        demoSnippet = "import requests; f'requests {requests.__version__}'"
+        badge = "SIMD / C",
+        titleFa = "محاسبات بومی NumPy (ARM64 NEON)",
+        descFa = "کتابخانه بومی NumPy کامپایل‌شده به زبان C برای پردازش برداری و بافری فوق‌سریع.",
+        demoSnippet = "import numpy as np; f'numpy {np.__version__} | sum={int(np.arange(1000).sum())}'"
     ),
     RuntimeCapability(
         badge = "Crypto",
-        titleFa = "رمزنگاری سریع C (hashlib و hmac)",
-        descFa = "توابع SHA-256، HMAC، struct و تولید بایت تصادفی با سرعت بومی زبان C.",
-        demoSnippet = "import hashlib, hmac; hmac.new(b'key', b'OK', hashlib.sha256).hexdigest()[:16]"
+        titleFa = "رمزنگاری بومی Rust/C (cryptography + PyCryptodome)",
+        descFa = "توابع AES، ChaCha20، SHA-256، HMAC و OpenSSL با سرعت کامل سخت‌افزاری.",
+        demoSnippet = "import cryptography, hashlib, hmac; (cryptography.__version__, hmac.new(b'k', b'OK', hashlib.sha256).hexdigest()[:16])"
+    ),
+    RuntimeCapability(
+        badge = "TLS / SSL",
+        titleFa = "گواهی‌نامه‌های certifi + OpenSSL کش‌شده",
+        descFa = "بارگذاری یک‌باره گواهی‌نامه‌ها در حافظه برای برقراری فوری اتصالات HTTPS و WSS.",
+        demoSnippet = "import ssl, certifi; (ssl.OPENSSL_VERSION, certifi.where())"
     ),
     RuntimeCapability(
         badge = "Stdlib",
         titleFa = "کتابخانه استاندارد کامل CPython",
-        descFa = "دسترسی کامل به sqlite3، json، re، pathlib، threading، urllib، zlib و صدها ماژول دیگر.",
-        demoSnippet = "import sqlite3, sys; (sys.implementation.name, sqlite3.sqlite_version)"
+        descFa = "دسترسی کامل به sqlite3، regex، yaml، zstandard، brotli، bs4، json، threading و صدها ماژول دیگر.",
+        demoSnippet = "import sqlite3, regex, zstandard; (sqlite3.sqlite_version, regex.__version__, zstandard.__version__)"
     )
 )
 
@@ -246,16 +249,46 @@ fun RuntimeScreen(
                                 style = MaterialTheme.typography.titleMedium
                             )
                         }
+                        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                        val isIgnoringBatteryOpt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+                        } else {
+                            true
+                        }
                         SpecRow("موتور اجرا", "${info.implementation} ${info.pythonVersion} (Native C)")
-                        SpecRow("بسته websockets", "v${info.websocketsVersion} (PyPI)")
-                        SpecRow("بسته requests", "v${info.requestsVersion} (PyPI)")
+                        SpecRow("بسته websockets", "v${info.websocketsVersion} (TLS کش‌شده + Host Fix)")
+                        SpecRow("بسته requests / aiohttp", "v${info.requestsVersion} + Native C")
                         SpecRow("موتور TLS / SSL", info.opensslVersion)
                         SpecRow(
                             "سرویس پس‌زمینه اندروید",
-                            if (uiState.isBackgroundServiceActive) "فعال (Foreground + WakeLock)" else "آماده (بهینه‌سازی خودکار هنگام اجرا)"
+                            if (uiState.isBackgroundServiceActive) "فعال (WakeLock + Wi-Fi Low-Latency)" else "آماده (بهینه‌سازی خودکار هنگام اجرا)"
+                        )
+                        SpecRow(
+                            "محدودیت باتری اندروید",
+                            if (isIgnoringBatteryOpt) "آزاد (حداکثر سرعت پس‌زمینه)" else "محدودشده (توصیه: آزادسازی)"
                         )
                         SpecRow("نسخه اندروید دستگاه", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
                         SpecRow("معماری پردازنده", Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a")
+
+                        if (!isIgnoringBatteryOpt && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Button(
+                                onClick = {
+                                    try {
+                                        context.startActivity(
+                                            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                        )
+                                    } catch (_: Exception) {
+                                    }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("battery_optimization_settings_button")
+                            ) {
+                                Text("باز کردن تنظیمات باتری (حذف محدودیت سرعت پس‌زمینه)")
+                            }
+                        }
                     }
                 }
             }

@@ -101,8 +101,17 @@ object CPythonBridge {
         }
     }
 
+    fun warmUp(context: Context): NativeRuntimeInfo {
+        val raw = runnerModule(context).callAttr("warm_up").toString()
+        return parseRuntimeInfo(raw)
+    }
+
     fun getRuntimeInfo(context: Context): NativeRuntimeInfo {
         val raw = runnerModule(context).callAttr("get_runtime_info").toString()
+        return parseRuntimeInfo(raw)
+    }
+
+    private fun parseRuntimeInfo(raw: String): NativeRuntimeInfo {
         val json = JSONObject(raw)
         val pkgsArray = json.optJSONArray("packages")
         val pkgs = buildList {

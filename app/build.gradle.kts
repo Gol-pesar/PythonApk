@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.pylaunch.k7m2vx"
     minSdk = 24
     targetSdk = 36
-    versionCode = 5
-    versionName = "2.1"
+    versionCode = 6
+    versionName = "2.2"
 
     ndk {
       abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -85,10 +85,30 @@ android {
 chaquopy {
   defaultConfig {
     version = "3.11"
+    extractPackages(
+      "websockets",
+      "certifi",
+      "aiohttp",
+      "requests",
+      "urllib3",
+      "httpx",
+      "httpcore",
+      "anyio"
+    )
     pip {
       install("websockets")
+      install("aiohttp")
+      install("httpx")
       install("requests")
       install("certifi")
+      install("cryptography")
+      install("pycryptodome")
+      install("numpy")
+      install("regex")
+      install("pyyaml")
+      install("zstandard")
+      install("brotli")
+      install("beautifulsoup4")
     }
   }
 }

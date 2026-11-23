@@ -87,7 +87,7 @@ fun OutputConsolePanel(
 
     LaunchedEffect(entries.size, entries.lastOrNull()?.text?.length) {
         if (entries.isNotEmpty()) {
-            listState.animateScrollToItem(entries.lastIndex)
+            listState.scrollToItem(entries.lastIndex)
         }
     }
 

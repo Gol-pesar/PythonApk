@@ -6,7 +6,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -34,6 +33,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -109,19 +111,31 @@ fun CodeEditorPanel(
                 .fillMaxSize()
                 .background(syntaxColors.editorBackground)
         ) {
-            // Scrollable Editor + Line Gutter
+            val dividerColor = MaterialTheme.colorScheme.outlineVariant
+            // Scrollable Editor + Line Gutter (single-pass layout without IntrinsicSize.Min)
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
+                    .drawBehind {
+                        val gutterWidthPx = 44.dp.toPx()
+                        drawRect(
+                            color = syntaxColors.gutterBackground,
+                            topLeft = Offset.Zero,
+                            size = Size(gutterWidthPx, size.height)
+                        )
+                        drawRect(
+                            color = dividerColor,
+                            topLeft = Offset(gutterWidthPx, 0f),
+                            size = Size(1.dp.toPx(), size.height)
+                        )
+                    }
                     .verticalScroll(verticalScroll)
             ) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(IntrinsicSize.Min)
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    // Line Number Gutter (single cached Text node for smooth 60fps typing)
+                    // Line Number Gutter (single cached Text node for smooth 60/120fps typing)
                     val gutterText = remember(lineCount) {
                         buildString(lineCount * 4) {
                             for (n in 1..lineCount) {
@@ -133,8 +147,6 @@ fun CodeEditorPanel(
                     Box(
                         modifier = Modifier
                             .width(44.dp)
-                            .fillMaxHeight()
-                            .background(syntaxColors.gutterBackground)
                             .padding(vertical = 12.dp, horizontal = 6.dp),
                         contentAlignment = Alignment.TopEnd
                     ) {
@@ -149,13 +161,8 @@ fun CodeEditorPanel(
                         )
                     }
 
-                    // Divider line between gutter and code
-                    Box(
-                        modifier = Modifier
-                            .width(1.dp)
-                            .fillMaxHeight()
-                            .background(MaterialTheme.colorScheme.outlineVariant)
-                    )
+                    // 1dp spacer matching drawBehind divider
+                    Box(modifier = Modifier.width(1.dp))
 
                     // Code Input Canvas
                     val fieldModifier = if (wordWrap) {

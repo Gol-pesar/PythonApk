@@ -1,6 +1,7 @@
 package com.example.ui
 
 import android.app.Application
+import android.os.Process
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.EditorSettings
@@ -125,10 +126,10 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
-        // Warm up native CPython runtime and load live package/version metadata off the main thread.
+        // Warm up native CPython runtime, pre-parsed TLS CA store, and websockets optimizations off UI thread.
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val info = CPythonBridge.getRuntimeInfo(getApplication())
+                val info = CPythonBridge.warmUp(getApplication())
                 _uiState.update { state ->
                     val updatedRepl = if (state.replEntries.size == 1 && state.replEntries.first().kind == ConsoleEntryKind.SYSTEM) {
                         initialReplBanner(info)
@@ -228,6 +229,11 @@ class PyLaunchViewModel(application: Application) : AndroidViewModel(application
 
         val startTime = System.currentTimeMillis()
         activeScriptFuture = scriptExecutor.submit {
+            try {
+                // Keep CPython event loop scheduled on big performance CPU cores even when backgrounded.
+                Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
+            } catch (_: Throwable) {
+            }
             val callback = object : CPythonCallback {
                 override fun onOutput(text: String, isError: Boolean) {
                     if (activeRunId != runId) return
